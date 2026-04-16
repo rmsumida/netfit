@@ -1,0 +1,33 @@
+sanitize:
+  hostname: false
+  ip_addresses: true
+  usernames: true
+  snmp_communities: true
+  enable_secrets: true
+  tacacs_radius_keys: true
+  crypto_keys: true
+  email_addresses: true
+
+analyze:
+  features:
+    - interfaces
+    - vlans
+    - etherchannel
+    - vrf
+    - ospf
+    - eigrp
+    - bgp
+    - static_routes
+    - hsrp
+    - vrrp
+    - glbp
+    - acl
+    - prefix_lists
+    - route_maps
+    - qos
+    - nat
+    - aaa
+    - snmp
+    - logging
+    - ntp
+    - crypto

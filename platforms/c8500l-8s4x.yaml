@@ -1,0 +1,97 @@
+platform_name: "Cisco_C8500L-8S4X"
+
+capabilities:
+  supported_interface_types:
+    - GigabitEthernet
+    - TenGigabitEthernet
+    - Port-channel
+    - Loopback
+    - Tunnel
+    - Management
+    - SVI
+
+  supports_subinterfaces: true
+
+  supports_trunking: true
+  supports_etherchannel: true
+  supports_spanning_tree: false
+
+  supports_vrf: true
+  supports_ospf: true
+  supports_eigrp: true
+  supports_bgp: true
+  supports_ipv6: true
+
+  supports_hsrp: true
+  supports_vrrp: true
+  supports_glbp: false
+
+  supports_aaa: true
+  supports_tacacs: true
+  supports_radius: true
+  supports_ssh: true
+  supports_management_acl: true
+
+  supports_snmp: true
+  supports_syslog: true
+  supports_ntp: true
+  supports_nat: true
+  supports_dhcp_server: true
+  supports_ip_sla: true
+  supports_object_tracking: true
+  supports_flow_monitoring: true
+
+  supports_qos: true
+
+  supports_crypto: true
+  supports_isakmp: true
+  supports_ikev2: true
+  supports_ipsec: true
+  supports_tunnel_interfaces: true
+
+scale:
+  max_interfaces: 20
+  max_physical_interfaces: 12
+  max_access_ports: 0
+  max_trunk_ports: 8
+  max_l3_interfaces: 96
+  max_port_channels: 8
+  max_tunnels: 300
+  max_subinterfaces: 500
+  max_vrfs: 24
+  max_bgp_neighbors: 200
+  max_static_routes: 4000
+  max_vlans: 256
+  ports:
+    native:
+      1G: 8
+      10G: 4
+      25G: 0
+      40G: 0
+      100G: 0
+    breakout:
+      10G_to_10x1G: 0
+      40G_to_4x10G: 0
+      100G_to_4x25G: 0
+    reserved_or_dedicated:
+      management: 1
+
+constraints:
+  intended_role: "wan_edge"
+
+fit_preferences:
+  role_alignment: "compact_wan_edge"
+  role_weight: 5
+  throughput_tier: "medium"
+  throughput_weight: 5
+  services_weight: 5
+  crypto_weight: 5
+  routing_scale_weight: 5
+  switching_bias: "low"
+  branch_bias: "high"
+  aggregation_bias: "low"
+
+notes:
+  - "Tuned planning profile for Cisco C8500L-8S4X."
+  - "Best for smaller routed edge sites and lighter WAN service density."
+  - "Less desirable for heavy BGP, high tunnel count, or dense uplink scale."

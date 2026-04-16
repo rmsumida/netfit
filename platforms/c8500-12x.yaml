@@ -1,0 +1,98 @@
+platform_name: "Cisco_C8500-12X"
+
+capabilities:
+  supported_interface_types:
+    - GigabitEthernet
+    - TenGigabitEthernet
+    - TwentyFiveGigE
+    - Port-channel
+    - Loopback
+    - Tunnel
+    - Management
+    - SVI
+
+  supports_subinterfaces: true
+
+  supports_trunking: true
+  supports_etherchannel: true
+  supports_spanning_tree: false
+
+  supports_vrf: true
+  supports_ospf: true
+  supports_eigrp: true
+  supports_bgp: true
+  supports_ipv6: true
+
+  supports_hsrp: true
+  supports_vrrp: true
+  supports_glbp: false
+
+  supports_aaa: true
+  supports_tacacs: true
+  supports_radius: true
+  supports_ssh: true
+  supports_management_acl: true
+
+  supports_snmp: true
+  supports_syslog: true
+  supports_ntp: true
+  supports_nat: true
+  supports_dhcp_server: true
+  supports_ip_sla: true
+  supports_object_tracking: true
+  supports_flow_monitoring: true
+
+  supports_qos: true
+
+  supports_crypto: true
+  supports_isakmp: true
+  supports_ikev2: true
+  supports_ipsec: true
+  supports_tunnel_interfaces: true
+
+scale:
+  max_interfaces: 28
+  max_physical_interfaces: 12
+  max_access_ports: 0
+  max_trunk_ports: 12
+  max_l3_interfaces: 192
+  max_port_channels: 16
+  max_tunnels: 750
+  max_subinterfaces: 1000
+  max_vrfs: 48
+  max_bgp_neighbors: 400
+  max_static_routes: 8000
+  max_vlans: 256
+  ports:
+    native:
+      1G: 0
+      10G: 12
+      25G: 0
+      40G: 0
+      100G: 0
+    breakout:
+      10G_to_10x1G: 0
+      40G_to_4x10G: 0
+      100G_to_4x25G: 0
+    reserved_or_dedicated:
+      management: 0
+
+constraints:
+  intended_role: "wan_edge"
+
+fit_preferences:
+  role_alignment: "mid_scale_wan_edge"
+  role_weight: 7
+  throughput_tier: "high"
+  throughput_weight: 7
+  services_weight: 7
+  crypto_weight: 7
+  routing_scale_weight: 7
+  switching_bias: "low"
+  branch_bias: "medium"
+  aggregation_bias: "medium"
+
+notes:
+  - "Tuned planning profile for Cisco C8500-12X."
+  - "Best for mid-scale WAN edge and routed service roles."
+  - "Good balance when high-end C8500 variants are not required."

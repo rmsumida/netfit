@@ -1,0 +1,100 @@
+platform_name: "Cisco_C8500-20X6C"
+
+capabilities:
+  supported_interface_types:
+    - GigabitEthernet
+    - TenGigabitEthernet
+    - TwentyFiveGigE
+    - FortyGigabitEthernet
+    - HundredGigE
+    - Port-channel
+    - Loopback
+    - Tunnel
+    - Management
+    - SVI
+
+  supports_subinterfaces: true
+
+  supports_trunking: true
+  supports_etherchannel: true
+  supports_spanning_tree: false
+
+  supports_vrf: true
+  supports_ospf: true
+  supports_eigrp: true
+  supports_bgp: true
+  supports_ipv6: true
+
+  supports_hsrp: true
+  supports_vrrp: true
+  supports_glbp: false
+
+  supports_aaa: true
+  supports_tacacs: true
+  supports_radius: true
+  supports_ssh: true
+  supports_management_acl: true
+
+  supports_snmp: true
+  supports_syslog: true
+  supports_ntp: true
+  supports_nat: true
+  supports_dhcp_server: true
+  supports_ip_sla: true
+  supports_object_tracking: true
+  supports_flow_monitoring: true
+
+  supports_qos: true
+
+  supports_crypto: true
+  supports_isakmp: true
+  supports_ikev2: true
+  supports_ipsec: true
+  supports_tunnel_interfaces: true
+
+scale:
+  max_interfaces: 64
+  max_physical_interfaces: 26
+  max_access_ports: 0
+  max_trunk_ports: 24
+  max_l3_interfaces: 512
+  max_port_channels: 32
+  max_tunnels: 2000
+  max_subinterfaces: 2000
+  max_vrfs: 128
+  max_bgp_neighbors: 1000
+  max_static_routes: 20000
+  max_vlans: 512
+  ports:
+    native:
+      1G: 20
+      10G: 6
+      25G: 0
+      40G: 0
+      100G: 0
+    breakout:
+      10G_to_10x1G: 0
+      40G_to_4x10G: 0
+      100G_to_4x25G: 0
+    reserved_or_dedicated:
+      management: 0
+
+constraints:
+  intended_role: "wan_edge"
+
+fit_preferences:
+  role_alignment: "high_scale_wan_edge"
+  role_weight: 10
+  throughput_tier: "very_high"
+  throughput_weight: 10
+  services_weight: 10
+  crypto_weight: 10
+  routing_scale_weight: 10
+  switching_bias: "low"
+  branch_bias: "low"
+  aggregation_bias: "high"
+
+notes:
+  - "Tuned planning profile for Cisco C8500-20X6C."
+  - "Best fit for large routed WAN edge, high-scale services, and dense uplink environments."
+  - "Prefer for high BGP/VRF/tunnel scale and mixed high-speed transport roles."

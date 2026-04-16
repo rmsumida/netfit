@@ -1,0 +1,321 @@
+"""CLI entry point for the hardware-refresh config analysis pipeline.
+
+Single-device mode (default):
+    python main.py input/router_config.txt
+
+Batch mode (directory of configs):
+    python main.py configs/
+
+Outputs land under the output directory, one subfolder per device in batch
+mode, plus a cross-device roll-up summary.
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from sanitizer import CiscoConfigSanitizer, load_rules
+from analyzer import analyze_config, save_report
+from platform_compare import build_platform_comparison_reports
+
+
+CONFIG_EXTENSIONS = ("*.txt", "*.cfg", "*.conf")
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="netfit",
+        description="Analyze a network-device config and rank candidate replacement platforms for a hardware refresh. (Current input support: Cisco IOS / IOS-XE.)",
+    )
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Path to a single config file, OR a directory of config files for batch mode.",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=Path("output"),
+        help="Output directory (default: output/).",
+    )
+    parser.add_argument(
+        "--rules",
+        type=Path,
+        default=Path("rules.yaml"),
+        help="Sanitization rules YAML (default: rules.yaml).",
+    )
+    parser.add_argument(
+        "--platforms",
+        type=Path,
+        default=Path("platforms"),
+        help="Directory of candidate platform YAML profiles (default: platforms/).",
+    )
+    parser.add_argument(
+        "--analyze-sanitized",
+        action="store_true",
+        help="Run the analyzer against the sanitized config (default: analyze the "
+             "original for parser fidelity; sanitized artifacts are still emitted).",
+    )
+    parser.add_argument(
+        "--no-sanitize",
+        action="store_true",
+        help="Skip sanitization entirely (input is treated as already-clean).",
+    )
+    return parser.parse_args(argv)
+
+
+def _validate_args(args):
+    if not args.input.exists():
+        raise FileNotFoundError(f"Input path does not exist: {args.input}")
+    if not args.rules.exists():
+        raise FileNotFoundError(f"Rules file not found: {args.rules}")
+    if not args.platforms.exists():
+        raise FileNotFoundError(f"Platforms directory not found: {args.platforms}")
+    platform_files = list(args.platforms.glob("*.yaml")) + list(args.platforms.glob("*.yml"))
+    if not platform_files:
+        raise FileNotFoundError(f"No platform YAML profiles in {args.platforms}")
+
+
+def _discover_batch_inputs(directory):
+    found = []
+    for pattern in CONFIG_EXTENSIONS:
+        found.extend(sorted(directory.glob(pattern)))
+    # Dedupe while preserving order.
+    seen = set()
+    unique = []
+    for path in found:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return unique
+
+
+def process_single_device(input_file, output_dir, rules_path, platforms_dir,
+                          *, analyze_sanitized=False, no_sanitize=False, quiet=False):
+    """Run the full pipeline against a single config file.
+
+    Returns a dict with keys: `device_name`, `output_dir`, `comparison`
+    (parsed platform_comparison.json content).
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sanitized_file = output_dir / "sanitized_config.txt"
+    mappings_file = output_dir / "sanitization_mappings.json"
+    report_file = output_dir / "analysis_report.json"
+    comparison_json = output_dir / "platform_comparison.json"
+    comparison_md = output_dir / "platform_comparison.md"
+    comparison_html = output_dir / "platform_comparison.html"
+    best_fit_md = output_dir / "best_fit_report.md"
+    best_fit_html = output_dir / "best_fit_report.html"
+
+    config_text = input_file.read_text(encoding="utf-8", errors="ignore")
+
+    if no_sanitize:
+        sanitized_file.write_text(config_text, encoding="utf-8")
+        mappings_file.write_text("{}", encoding="utf-8")
+    else:
+        rules = load_rules(str(rules_path))
+        sanitizer = CiscoConfigSanitizer(rules)
+        sanitized_file.write_text(sanitizer.sanitize(config_text), encoding="utf-8")
+        mappings_file.write_text(
+            json.dumps(sanitizer.get_mappings(), indent=2), encoding="utf-8"
+        )
+
+    analysis_source = sanitized_file if analyze_sanitized else input_file
+    report = analyze_config(str(analysis_source))
+    save_report(report, str(report_file))
+
+    comparison = build_platform_comparison_reports(
+        analysis_json_path=str(report_file),
+        target_profiles_folder=str(platforms_dir),
+        comparison_json_output=str(comparison_json),
+        comparison_md_output=str(comparison_md),
+        comparison_html_output=str(comparison_html),
+        best_fit_md_output=str(best_fit_md),
+        best_fit_html_output=str(best_fit_html),
+    )
+
+    if not quiet:
+        print(f"[{input_file.name}] analysis → {analysis_source}")
+        print(f"[{input_file.name}] best-fit: {comparison.get('best_fit_platform')} "
+              f"(recommended={comparison.get('recommended_platform')})")
+
+    return {
+        "device_name": report.get("summary", {}).get("hostname") or input_file.stem,
+        "input_file": str(input_file),
+        "output_dir": str(output_dir),
+        "comparison": comparison,
+    }
+
+
+def run_batch(input_dir, output_dir, rules_path, platforms_dir,
+              *, analyze_sanitized=False, no_sanitize=False):
+    """Process every config file in `input_dir` and emit a roll-up summary."""
+    inputs = _discover_batch_inputs(input_dir)
+    if not inputs:
+        raise FileNotFoundError(
+            f"No config files (*.txt, *.cfg, *.conf) found in {input_dir}"
+        )
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device_results = []
+    for path in inputs:
+        device_out = output_dir / path.stem
+        try:
+            result = process_single_device(
+                path, device_out, rules_path, platforms_dir,
+                analyze_sanitized=analyze_sanitized,
+                no_sanitize=no_sanitize,
+                quiet=True,
+            )
+        except Exception as exc:
+            print(f"[{path.name}] FAILED: {exc}", file=sys.stderr)
+            device_results.append({
+                "device_name": path.stem,
+                "input_file": str(path),
+                "output_dir": str(device_out),
+                "error": str(exc),
+            })
+            continue
+        device_results.append(result)
+        comparison = result["comparison"]
+        print(f"[{path.name}] best-fit={comparison.get('best_fit_platform')} "
+              f"recommended={comparison.get('recommended_platform')}")
+
+    summary = _build_batch_summary(device_results)
+    (output_dir / "_batch_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    (output_dir / "_batch_summary.md").write_text(
+        _render_batch_markdown(summary), encoding="utf-8"
+    )
+    return summary
+
+
+def _build_batch_summary(device_results):
+    """Roll up per-device comparisons into a cross-device matrix.
+
+    Produces:
+      devices: one row per device with best-fit, recommendation, key counts.
+      platform_fit_matrix: dict of platform → dict of device → fitness score.
+    """
+    devices = []
+    platform_fit_matrix = {}
+
+    for r in device_results:
+        if "error" in r:
+            devices.append({
+                "device_name": r["device_name"],
+                "input_file": r["input_file"],
+                "output_dir": r["output_dir"],
+                "error": r["error"],
+            })
+            continue
+
+        comparison = r["comparison"]
+        devices.append({
+            "device_name": r["device_name"],
+            "input_file": r["input_file"],
+            "output_dir": r["output_dir"],
+            "top_ranked_platform": comparison.get("top_ranked_platform"),
+            "recommended_platform": comparison.get("recommended_platform"),
+            "best_fit_platform": comparison.get("best_fit_platform"),
+        })
+        for result in comparison.get("results", []):
+            platform = result["platform_name"]
+            platform_fit_matrix.setdefault(platform, {})[r["device_name"]] = {
+                "fitness_score": result["fitness_score"],
+                "overall_recommendation": (
+                    result.get("assessment", {})
+                          .get("assessment_summary", {})
+                          .get("overall_recommendation")
+                ),
+            }
+
+    return {
+        "device_count": len(device_results),
+        "successful": sum(1 for d in devices if "error" not in d),
+        "failed": sum(1 for d in devices if "error" in d),
+        "devices": devices,
+        "platform_fit_matrix": platform_fit_matrix,
+    }
+
+
+def _render_batch_markdown(summary):
+    devices = summary.get("devices", [])
+    matrix = summary.get("platform_fit_matrix", {})
+
+    lines = ["# Batch Refresh Comparison", ""]
+    lines.append(
+        f"**{summary['successful']}** of **{summary['device_count']}** devices processed successfully."
+    )
+    if summary["failed"]:
+        lines.append(f"**{summary['failed']}** devices failed — see entries with `error` field.")
+    lines.append("")
+
+    # Per-device summary.
+    lines.append("## Per-Device Best Fit")
+    lines.append("")
+    lines.append("| Device | Top-Ranked | Recommended | Output |")
+    lines.append("|--------|-----------|-------------|--------|")
+    for d in devices:
+        if "error" in d:
+            lines.append(f"| {d['device_name']} | — | — | ERROR: {d['error']} |")
+            continue
+        recommended = d.get("recommended_platform") or "_none_"
+        lines.append(
+            f"| {d['device_name']} | "
+            f"{d.get('top_ranked_platform', '—')} | "
+            f"{recommended} | "
+            f"`{d['output_dir']}` |"
+        )
+    lines.append("")
+
+    # Platform-fit matrix: rows = platforms, cols = devices, cells = fitness score.
+    if matrix:
+        device_names = sorted({
+            dev for per_device in matrix.values() for dev in per_device
+        })
+        lines.append("## Platform-Fit Matrix")
+        lines.append("")
+        lines.append("Fitness scores (higher is better) across all devices.")
+        lines.append("")
+        header = "| Platform | " + " | ".join(device_names) + " |"
+        sep = "|----------|" + "|".join(["---"] * len(device_names)) + "|"
+        lines.append(header)
+        lines.append(sep)
+        for platform in sorted(matrix):
+            cells = []
+            for device in device_names:
+                cell = matrix[platform].get(device)
+                cells.append(f"{cell['fitness_score']:.0f}" if cell else "—")
+            lines.append(f"| {platform} | " + " | ".join(cells) + " |")
+
+    return "\n".join(lines) + "\n"
+
+
+def main(argv=None):
+    args = _parse_args(argv)
+    _validate_args(args)
+
+    if args.input.is_dir():
+        run_batch(
+            args.input, args.output, args.rules, args.platforms,
+            analyze_sanitized=args.analyze_sanitized,
+            no_sanitize=args.no_sanitize,
+        )
+        print(f"\nBatch summary: {args.output / '_batch_summary.md'}")
+    else:
+        process_single_device(
+            args.input, args.output, args.rules, args.platforms,
+            analyze_sanitized=args.analyze_sanitized,
+            no_sanitize=args.no_sanitize,
+        )
+
+
+if __name__ == "__main__":
+    main()

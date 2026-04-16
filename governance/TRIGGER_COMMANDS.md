@@ -1,4 +1,4 @@
-# Trigger Commands Reference — {{PROJECT_NAME}}
+# Trigger Commands Reference — netfit
 
 > Two commands manage session close-out. Session start is automatic — no trigger needed.
 

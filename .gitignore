@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Pipeline artifacts — generated outputs and any sensitive input configs.
+# The input/ directory itself is kept on clone via input/.gitkeep so the
+# expected layout is visible; its contents are never committed.
+input/*
+!input/.gitkeep
+output/
+
+# Claude Code / agent scratch (kept local, not shared)
+.claude/
