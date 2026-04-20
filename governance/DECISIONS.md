@@ -65,4 +65,24 @@
 
 ---
 
-*New decisions should be added with sequential numbering (DEC-004, etc.)*
+## DEC-004: Runtime parsers keyed by intent, not raw command string
+
+| Field | Value |
+|-------|-------|
+| Status | LOCKED |
+| Date | 2026-04-19 |
+| Session | 002 |
+
+**Decision:** `runtime_parsers.py` exposes one function **per intent key** (e.g., `crypto_ipsec_summary`, `license_summary`, `optics`), not one per exact show-command string. The loader normalizes each incoming `command` field to an intent key via an alias map before dispatching. Parsers accept `(raw_text, source_command)` so they can branch on alias when output shapes differ.
+
+**Alternatives Considered:**
+1. One parser per exact command string (`parse_show_crypto_ipsec_sa_count`, `parse_show_crypto_ipsec_sa`, etc.) — Rejected: explodes parser count linearly with train/platform variants; adding a new train would mean adding new parser modules instead of a one-line alias entry.
+2. Single mega-parser that sniffs output format and self-routes — Rejected: mixes dispatch and parsing, harder to unit-test, and output-sniffing is fragile vs. an explicit alias map driven by the known command string that was run.
+
+**Rationale:** Validated on Cisco ASR 1013 / IOS-XE 16.03.07 (session 002) — the modern-IOS-XE commands `show crypto ipsec sa count`, `show license summary`, and `show interfaces transceiver [detail]` all return `% Invalid input` on that older train. The working aliases (`show crypto ipsec sa`, `show license all`) produce outputs that are strict supersets of the modern short-form outputs, so a single intent-keyed parser can absorb both inputs with a light branch. This keeps the parser count bounded by intents (~15) rather than by the Cartesian product of (intent × train × dialect).
+
+**Conditions for revisiting:** A situation where two aliases of the same intent have such divergent output shapes that the "branch on source_command" pattern becomes unwieldy — at which point split the parser, but keep the intent-keyed loader dispatch.
+
+---
+
+*New decisions should be added with sequential numbering (DEC-005, etc.)*

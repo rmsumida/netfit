@@ -88,12 +88,12 @@ pip install -r requirements-dev.txt       # adds pytest
 
 Single-device run:
 ```bash
-python main.py input/router_config.txt
+python3 main.py input/router_config.txt
 ```
 
 Batch run (directory of `*.txt` / `*.cfg` / `*.conf`):
 ```bash
-python main.py path/to/configs/ --output path/to/output/
+python3 main.py path/to/configs/ --output path/to/output/
 ```
 
 Flags on `main.py`:
@@ -105,9 +105,10 @@ Flags on `main.py`:
 
 Tests:
 ```bash
-python3 -m pytest tests/                   # full suite (66 tests)
-python3 -m pytest tests/test_sanitizer.py  # single file
-python3 -m pytest tests/ -v -k "best_fit"  # filter by name
+python3 -m pytest tests/                                                 # full suite (66 tests)
+python3 -m pytest tests/test_sanitizer.py                                # single file
+python3 -m pytest tests/ -v -k "best_fit"                                # filter by substring
+python3 -m pytest tests/test_sanitizer.py::test_ip_addresses_tokenized   # single test by node ID
 ```
 
 ### Pipeline architecture
@@ -181,6 +182,6 @@ Four top-level sections consumed by the pipeline:
 
 ### Where to find more
 
-- `documents/ARCHITECTURE.md` — full architecture and design document.
-- `documents/NETBRAIN_HARVEST.md` — NetBrain feature/data harvest notes.
+- `documents/ARCHITECTURE.md` (~520 lines) — full pipeline design, vendor/OS boundary rationale, target hexagonal/ports-and-adapters direction, scoring-model internals. Read before proposing structural changes.
+- `documents/NETBRAIN_HARVEST.md` (~590 lines) — spec for the planned `runtime_loader.py`: which `show` commands netfit needs, expected CSV shape from NetBrain, and per-command parsing requirements. Read when touching runtime-data ingestion.
 - Active development work — tracked as GitHub Issues (`gh issue list`).

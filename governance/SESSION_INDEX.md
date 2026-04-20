@@ -5,3 +5,4 @@
 | Session | Date | Summary | Key Outcomes |
 |---------|------|---------|--------------|
 | [001](../sessions/session-001.md) | 2026-04-16 | Migrate existing netfit code into governance template | Flat layout at root, large docs moved to `documents/`, scratchpad todos converted to GitHub Issues, DEC-001/002/003 locked |
+| [002](../sessions/session-002.md) | 2026-04-19 | Fold NetBrain R12.3 harvest validation into docs; open runtime-loader issue | `NETBRAIN_HARVEST.md` +172 lines (template strategy, export formats, intent-group alias table); DEC-004 intent-keyed dispatch locked; issue #7 opened; `tmp/` gitignored |

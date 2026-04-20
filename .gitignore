@@ -25,3 +25,6 @@ output/
 
 # Claude Code / agent scratch (kept local, not shared)
 .claude/
+
+# Local scratch / working drops (sample exports, cross-tool session logs, etc.)
+tmp/

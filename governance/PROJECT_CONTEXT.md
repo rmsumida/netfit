@@ -1,7 +1,7 @@
 # netfit — Project Context
 
 > **Purpose:** Single source of truth for every Claude session.
-> Last updated: 2026-04-16 | Session: 001
+> Last updated: 2026-04-19 | Session: 002
 
 ---
 
@@ -23,6 +23,7 @@
 | DEC-001 — Vendor/OS boundary: only `analyzer.py` parses config dialect | LOCKED | 2026-04-16 | Keeps new-dialect onboarding additive; assessor and scoring stay vendor-neutral |
 | DEC-002 — Flat repo layout: code at root, governance alongside | LOCKED | 2026-04-16 | netfit is the repo; a nested `src/` adds no value |
 | DEC-003 — GitHub Issues for dev work; ACTION_ITEMS.md for governance | LOCKED | 2026-04-16 | Avoids duplicating issue data across two trackers |
+| DEC-004 — Runtime parsers keyed by intent, not raw command string | LOCKED | 2026-04-19 | Platform/train variation (validated ASR1013/16.03.07) means one intent has multiple exact-command aliases |
 
 ## 3. Goals & Success Criteria
 

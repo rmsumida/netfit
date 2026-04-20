@@ -1,35 +1,147 @@
 # NetBrain Harvest Reference
 
-This document specifies the `show` commands that `netfit` needs from each device to enable runtime-aware platform-fit scoring (route scale, NAT scale, crypto scale, optics, license tier, CPU/memory headroom). It includes parsing requirements and sample output for each command so you can validate that NetBrain's CSV export shape is ingestible.
+This document specifies the `show` commands that `netfit` needs from each device to enable runtime-aware platform-fit scoring (route scale, NAT scale, crypto scale, optics, license tier, CPU/memory headroom). It includes parsing requirements and sample output for each command so you can validate that NetBrain's export shape (native text or CSV) is ingestible.
 
 Commands and sample outputs below are Cisco IOS / IOS-XE, which is the currently-supported input family. When extending coverage to NX-OS, IOS-XR, or non-Cisco platforms, add a parallel section per OS dialect rather than overloading the Cisco examples.
 
 **Use this document when:**
-- Configuring a NetBrain Data View / Path / Show Command Frame for harvesting
-- Validating an exported CSV against the parser's expectations
-- Adding a new device family that may have OS-specific output differences
+- Configuring a NetBrain **CLI Command Template** (primary) or Data View Template (optional) for harvesting
+- Validating a NetBrain export (native text or CSV) against the parser's expectations
+- Adding a new device family or software train that may have OS-specific command/output differences
 
 ---
 
-## CSV format expectations
+## NetBrain template strategy
 
-The netfit runtime ingester (planned `runtime_loader.py`) expects a CSV per device, OR one combined CSV across the harvest job, with at least these columns:
+Validated on NetBrain R12.3 (session 2026-04-16).
+
+**Primary object:** **CLI Command Template** — best fit for batch harvesting of raw CLI output across a device group. This is the object netfit's harvest targets.
+
+**Optional:** **Data View Template** — only useful if you want on-screen presentation or dashboarding on top of the harvest. Not required for ingestion.
+
+**Device selection:** runtime — device group, filtered list, or map/manual selection.
+
+**Session behavior to configure:**
+- Disable paging
+- Continue on failure (a single unsupported command should not abort the run)
+- Preserve raw output verbatim
+
+### Maintain platform-variant templates — don't force one universal set
+
+IOS-XE command syntax varies meaningfully across trains. Rather than one template that tolerates per-command failures, maintain a small number of variant templates scoped by platform / software train, and let NetBrain run the variant that matches the device group.
+
+**Known platform/train compatibility (as of 2026-04-16):**
+
+Validated on **Cisco ASR 1013 / IOS-XE 16.03.07** — the following modern-IOS-XE syntaxes return `% Invalid input`:
+
+| Command (modern IOS-XE) | ASR1000 16.x behavior | Working equivalent on this train |
+|-------------------------|-----------------------|----------------------------------|
+| `show interfaces transceiver detail` | `% Invalid input` | None found — defer optics collection |
+| `show interfaces transceiver` | `% Invalid input` | None found — defer optics collection |
+| `show crypto ipsec sa count` | `% Invalid input` | `show crypto ipsec sa` (parser derives count from detailed output) |
+| `show license summary` | `% Invalid input` | `show license all` |
+
+Parser-side handling of these alternates is specified under [Parser intent groups / command aliases](#parser-intent-groups--command-aliases). The parser matches on intent, not exact command string, so extending this table does **not** require new parsers — only new entries in the alias map.
+
+### Recommended template variants
+
+**Template 1 — Modern IOS-XE (17.x+)**
+
+```
+Template name: NETFIT_RUNTIME_MINIMAL_IOSXE_MODERN
+```
+
+Commands:
+```
+show inventory
+show version
+show interfaces transceiver detail
+show ip route summary
+show ip nat statistics
+show crypto ipsec sa count
+show license summary
+show processes cpu sorted
+```
+
+**Template 2 — ASR1000 older IOS-XE (16.x)**
+
+```
+Template name: NETFIT_RUNTIME_MINIMAL_ASR1000_16X
+```
+
+Commands:
+```
+show inventory
+show version
+show ip route summary
+show ip nat statistics
+show crypto ipsec sa
+show license all
+show processes cpu sorted
+```
+
+Optics/transceiver collection is omitted on this variant — both tested syntaxes failed on IOS-XE 16.03.07. Hardware identity is still adequately covered by `show inventory` + `show version`. Revisit if a stable ASR-compatible optics command is identified.
+
+**When adding a new variant:** duplicate the modern template, swap in known-working aliases from the intent-group table, test on one device, then register the template name + command set here.
+
+---
+
+## Export format expectations
+
+The netfit runtime ingester (planned `runtime_loader.py`) must accept both of NetBrain's plausible export shapes. Either form carries the same logical record: `(device_name, command, timestamp, raw_output)`.
+
+### Native NetBrain text export (primary, validated 2026-04-16)
+
+NetBrain R12.3's CLI Command Template produces a text file in which each command execution is preceded by a delimiter header of the form:
+
+```
+#--- <device_name> <command text> Execute at <YYYY-MM-DD HH:MM:SS>
+<raw command output, multi-line, preserved verbatim>
+```
+
+The loader splits the file on `#---` delimiter lines to recover `(device_name, command, timestamp, output)` tuples. One file may contain multiple devices and multiple commands; order is not significant.
+
+**Header regex:**
+```
+^#---\s+(?P<device>\S+)\s+(?P<command>.+?)\s+Execute at\s+(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*$
+```
+
+**Sample (sanitized, from ASR 1013 / IOS-XE 16.03.07):**
+```
+#--- deviceXXXXXXXXX show inventory Execute at 2026-04-16 17:28:29
+deviceXXXXXXXXX>show inventory
+NAME: "Chassis", DESCR: "Cisco ASR1013 Chassis"
+PID: ASR1013 , VID: V01 , SN: XOX1234ABCD
+...
+
+#--- deviceXXXXXXXXX show version Execute at 2026-04-16 17:28:29
+deviceXXXXXXXXX>show version
+Cisco IOS XE Software, Version 16.03.07
+...
+```
+
+**Loader responsibilities:**
+- Strip the echoed command prompt (e.g., `deviceXXXXXXXXX>show inventory`) from the first line of each block before passing the body to the per-command parser.
+- Normalize the captured `command` string to an **intent key** via the alias map (see [Parser intent groups / command aliases](#parser-intent-groups--command-aliases)), then dispatch to the parser keyed by that intent — not by raw command text.
+- Handle the case where a command block contains an error line such as `% Invalid input detected at '^' marker.` — skip the block and emit a warning; do not attempt to parse.
+
+### CSV format (alternative)
+
+If NetBrain is configured to export CSV instead (or a downstream tool re-shapes the text export), the loader accepts one row per `(device, command)` pair with at least these columns:
 
 | Column | Required? | Purpose |
 |--------|-----------|---------|
 | `device_name` (or `hostname`) | Yes | Used to correlate with the device's config file in `input/`. Must match the hostname found in the config (`hostname FOO` directive) — case-insensitive comparison is fine. |
-| `command` | Yes | The show command exactly as it was run (e.g., `show ip route summary`). |
+| `command` | Yes | The show command exactly as it was run (e.g., `show ip route summary`). Normalized to an intent key by the alias map before dispatch. |
 | `result` (or `output`) | Yes | The raw text output of the command, multi-line, preserved verbatim. |
 | `timestamp` | Optional | When the command was run; used for staleness checks. |
 | `vendor` / `os_version` | Optional | Helps disambiguate output dialect (IOS vs. IOS-XE vs. NX-OS) when the parser needs to branch. |
 
-**Column-name flexibility:** the loader will accept common synonyms (`device` / `hostname` / `device_name`; `command` / `cmd`; `result` / `output` / `raw_output`). If NetBrain's export uses different names, that's configurable.
-
-**One row per (device, command) pair.** That is the format NetBrain typically produces and is the format the loader will assume by default.
+**Column-name flexibility:** the loader accepts common synonyms (`device` / `hostname` / `device_name`; `command` / `cmd`; `result` / `output` / `raw_output`). If NetBrain's export uses different names, that's configurable.
 
 **Encoding:** UTF-8 with no BOM preferred. ANSI/cp1252 acceptable but the loader will need a charset hint.
 
-**Multi-line result handling:** the `result` field will contain embedded newlines. NetBrain's CSV export must quote these correctly per RFC 4180 (field wrapped in `"..."`, internal `"` escaped as `""`). If NetBrain replaces newlines with literal `\n` strings or strips them, that needs to be undone before ingestion.
+**Multi-line result handling:** the `result` field will contain embedded newlines. The CSV export must quote these correctly per RFC 4180 (field wrapped in `"..."`, internal `"` escaped as `""`). If NetBrain replaces newlines with literal `\n` strings or strips them, that needs to be undone before ingestion.
 
 ---
 
@@ -129,6 +241,8 @@ Vendor SN: ABC123456
 **Parsing complexity:** Medium-Hard. Output dialect varies. May need OS-specific branches.
 
 **NetBrain notes:** if NetBrain can run a "for each interface" loop and concatenate per-port output, that's easier to parse than the merged form. Either is acceptable.
+
+**Intent group:** `optics` — aliases include `show interfaces transceiver detail`, `show interfaces transceiver`, and `show idprom interface <name>`. **Validation status:** no ASR1000/IOS-XE 16.x alias has been found that works; on that train the optics intent is currently deferred and the command is omitted from the `NETFIT_RUNTIME_MINIMAL_ASR1000_16X` template. See the [alias table](#parser-intent-groups--command-aliases) for the current list.
 
 ---
 
@@ -233,7 +347,9 @@ Crypto map tag: VPNMAP, local addr 198.51.100.1
 
 **Parsing complexity:** Easy. ~5 lines.
 
-**NetBrain notes:** if `show crypto ipsec sa count` is not universally available (older trains), pair it with `show crypto session summary` (next command in v1-full set) and parse from that.
+**NetBrain notes:** `show crypto ipsec sa count` is not available on ASR1000 / IOS-XE 16.x. On that train the validated alias is `show crypto ipsec sa` (full detail), from which the parser derives the scalar count. `show crypto session summary` (command #14) is a complementary signal, not a replacement.
+
+**Intent group:** `crypto_ipsec_summary` — aliases `show crypto ipsec sa count` • `show crypto ipsec sa`. See the [alias table](#parser-intent-groups--command-aliases).
 
 ---
 
@@ -268,6 +384,10 @@ License Storage: bootflash:tracelogs/license_data.tlog
 - Classic: `License Level:\s+(\S+)`
 
 **Parsing complexity:** Medium. Two output dialects to handle.
+
+**NetBrain notes:** `show license summary` is not available on ASR1000 / IOS-XE 16.x. The validated alias on that train is `show license all`, which produces a superset of the Classic-licensing output the parser already handles.
+
+**Intent group:** `license_summary` — aliases `show license summary` • `show license all` • `show license feature`. See the [alias table](#parser-intent-groups--command-aliases).
 
 ---
 
@@ -553,13 +673,54 @@ Fields that aren't harvested will be `null` — the assessor's `_get(...)` defau
 
 ---
 
+## Parser intent groups / command aliases
+
+Platform and software-train variation means the same intent — e.g., "tell me how many IPsec SAs are active" — is satisfied by different exact command strings on different devices. The loader and parsers match on **intent key**, not raw command string. The loader normalizes the incoming `command` field to an intent key via this map before dispatching to `runtime_parsers.py`.
+
+| Intent key | Accepted command strings (aliases) | Parser output shape |
+|------------|-------------------------------------|---------------------|
+| `inventory` | `show inventory` | `runtime.inventory.*` |
+| `version` | `show version` | `runtime.platform.software_version`, `image_name`, `uptime_seconds`, `license_level` (legacy) |
+| `optics` | `show interfaces transceiver detail` • `show interfaces transceiver` • `show idprom interface <name>` | `runtime.optics[]` |
+| `route_table_ipv4_summary` | `show ip route summary` | `runtime.route_table.ipv4_*` |
+| `route_table_ipv6_summary` | `show ipv6 route summary` | `runtime.route_table.ipv6_*` |
+| `route_table_per_vrf` | `show ip route vrf *` • `show ip route vrf <name> summary` (fan-out) | `runtime.route_table.per_vrf[<name>].ipv4_total` |
+| `bgp_summary_all` | `show ip bgp all summary` | `runtime.bgp.per_neighbor[<ip>].*` |
+| `nat_statistics` | `show ip nat statistics` | `runtime.nat.*` |
+| `crypto_ipsec_summary` | `show crypto ipsec sa count` • `show crypto ipsec sa` | `runtime.crypto.active_sas` (derived from full output if `count` form unavailable) |
+| `crypto_session_summary` | `show crypto session summary` | `runtime.crypto.active_sessions`, `active_ike_sessions` |
+| `license_summary` | `show license summary` • `show license all` • `show license feature` | `runtime.license.*` |
+| `cpu_processes` | `show processes cpu sorted` | `runtime.platform.cpu_*`, `runtime.platform.top_processes[]` |
+| `memory` | `show memory statistics` • `show memory summary` | `runtime.platform.memory_*` |
+| `interfaces_rates` | `show interfaces summary` | `runtime.interfaces.<name>.rx_bps_5min`, `tx_bps_5min` |
+
+Each parser function in `runtime_parsers.py`:
+- Is keyed by **intent**, not raw command string (e.g., `parse_crypto_ipsec_summary(raw_text, source_command)`).
+- Accepts the raw output of **any of its aliases** and produces the same output dict.
+- When a short/summary form (e.g., `sa count`) is unavailable and only the long/detail form (e.g., `sa`) is present, the parser is responsible for **deriving** the summary scalar from the detailed output.
+
+**Alias validation status (2026-04-16):**
+
+| Intent | Train | Validated alias | Note |
+|--------|-------|----------------|------|
+| `crypto_ipsec_summary` | IOS-XE 17.x+ | `show crypto ipsec sa count` | Primary |
+| `crypto_ipsec_summary` | IOS-XE 16.x (ASR1000) | `show crypto ipsec sa` | Derived count |
+| `license_summary` | IOS-XE 17.x+ (Smart) | `show license summary` | Primary |
+| `license_summary` | IOS-XE 16.x (ASR1000) | `show license all` | Classic-style output |
+| `optics` | IOS-XE 17.x+ | `show interfaces transceiver detail` | Primary |
+| `optics` | IOS-XE 16.x (ASR1000) | *(unresolved)* | Deferred in `NETFIT_RUNTIME_MINIMAL_ASR1000_16X` |
+
+When a new train/platform is validated, add a row here and update the variant template under [NetBrain template strategy](#netbrain-template-strategy). No new parser code is required if the intent already has a parser — only an alias-map entry.
+
+---
+
 ## Implementation hooks (for reference)
 
 When the runtime loader is built:
 
-1. **New file:** `runtime_loader.py` — exposes `load_runtime_for_device(csv_path, hostname) -> dict | None`. Returns `None` if no rows for the hostname (signal to the caller that this device has no runtime augmentation).
+1. **New file:** `runtime_loader.py` — exposes `load_runtime_for_device(export_path, hostname) -> dict | None`. Accepts either a NetBrain native text export (split on `#---` delimiters) or a CSV. Returns `None` if no records for the hostname (signal to the caller that this device has no runtime augmentation). Also exposes the alias map that normalizes a raw `command` string to an **intent key** before parser dispatch.
 
-2. **New parser submodule:** `runtime_parsers.py` — one function per show command (`parse_show_ip_route_summary`, `parse_show_inventory`, etc.). Each takes a raw text blob and returns a structured dict. These are pure functions — easy to unit-test against captured sample output.
+2. **New parser submodule:** `runtime_parsers.py` — one function per **intent key** (not per raw command string): `parse_inventory`, `parse_route_table_ipv4_summary`, `parse_crypto_ipsec_summary`, etc. Each takes a raw text blob plus the source command string (so it can branch when aliases produce different output shapes) and returns a structured dict. These are pure functions — easy to unit-test against captured sample output.
 
 3. **Analyzer enrichment:** at the end of `analyze_config()`, look up runtime data by hostname and merge it under `analysis["runtime"]` if present.
 
@@ -577,11 +738,23 @@ When the runtime loader is built:
 
 Before wiring this into the tool, validate against a sample export from a real device:
 
-1. **CSV column names match** (or are remappable to) `device_name`, `command`, `result`.
-2. **Multi-line `result` values are properly quoted** — open the CSV in a text editor and confirm the show output is wrapped in `"..."` with internal `"` escaped as `""`.
-3. **No truncation** — `show ip route summary` and `show ip bgp all summary` outputs can exceed several KB. Some CSV exporters truncate cells at 32K characters.
-4. **Hostname matches the config's `hostname` directive** exactly (case-insensitive). If NetBrain uses an inventory-management name that differs from the configured hostname, plan a mapping table.
-5. **Each device appears once per command** — duplicate rows (e.g., from re-runs) need to be deduplicated, ideally by keeping the most recent `timestamp`.
-6. **Sample one command's output and walk it through this document's parsing strategy by hand** — confirms the format matches what the parser will expect.
+**Format-agnostic checks:**
 
-If any of those don't hold, capture an actual sample CSV and we'll adjust the loader's expectations to match.
+1. **Hostname matches the config's `hostname` directive** exactly (case-insensitive). If NetBrain uses an inventory-management name that differs from the configured hostname, plan a mapping table.
+2. **Each (device, command) pair appears once** — duplicate records (e.g., from re-runs) need to be deduplicated, ideally by keeping the most recent `timestamp`.
+3. **No truncation** — `show ip route summary` and `show ip bgp all summary` outputs can exceed several KB. Text exports rarely truncate; some CSV exporters cap cells at 32K characters.
+4. **The command strings in the export are covered by the alias map** in [Parser intent groups / command aliases](#parser-intent-groups--command-aliases). If a device ran `show license all` and no entry maps that string to the `license_summary` intent, the loader will drop the record silently.
+5. **Command-not-supported blocks are detected, not parsed** — `% Invalid input detected at '^' marker.` lines must be recognized and skipped with a warning, not fed to a parser.
+6. **Sample one command's output and walk it through this document's parsing strategy by hand** — confirms the raw format matches what the parser expects.
+
+**Native text export (primary) — additional checks:**
+
+7. **`#--- <device> <command> Execute at <timestamp>` delimiter present before every command block** and matches the documented regex.
+8. **Echoed command prompts** (e.g., `deviceXXXXXXXXX>show inventory`) on the first line of each output block are stripped by the loader before parsing.
+
+**CSV export (alternative) — additional checks:**
+
+9. **Column names match** (or are remappable to) `device_name`, `command`, `result`.
+10. **Multi-line `result` values are properly quoted** — open the CSV in a text editor and confirm the show output is wrapped in `"..."` with internal `"` escaped as `""`. If NetBrain replaces newlines with literal `\n`, undo that before ingestion.
+
+If any of those don't hold, capture an actual sample export and we'll adjust the loader's expectations to match.
