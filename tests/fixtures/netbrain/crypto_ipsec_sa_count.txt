@@ -1,0 +1,3 @@
+Total IPsec SAs: 247
+   Active IPsec SAs: 247
+   Cloned IPsec SAs: 0

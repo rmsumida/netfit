@@ -1,0 +1,15 @@
+Total active translations: 12453 (4 static, 12449 dynamic; 8127 extended)
+Peak translations: 18900, occurred 14:23:45 ago
+Outside interfaces:
+  GigabitEthernet0/0/0
+Inside interfaces:
+  GigabitEthernet0/0/1
+Hits: 4823498234  Misses: 124993
+CEF Translated packets: 4823498234, CEF Punted packets: 124993
+Expired translations: 4291847
+Dynamic mappings:
+  -- Inside Source
+  [Id: 1] access-list NAT pool POOL refcount 12449
+   pool POOL: netmask 255.255.255.0
+        start 198.51.100.1 end 198.51.100.254
+        type generic, total addresses 254, allocated 247 (97%), misses 14

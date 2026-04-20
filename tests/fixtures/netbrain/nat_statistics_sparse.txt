@@ -1,0 +1,9 @@
+Total active translations: 4444 (4437 static, 7 dynamic; 7 extended)
+Outside interfaces:
+ GigabitEthernet0/0/0.700, GigabitEthernet0/0/0.800
+ TenGigabitEthernet0/0/1.104
+Inside interfaces:
+ Port-channel1.100
+Dynamic mappings:
+ start 192.0.2.10 end 192.0.2.254
+ type generic, total addresses 245, allocated 1 (0%)

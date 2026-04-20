@@ -17,6 +17,7 @@ from pathlib import Path
 from sanitizer import CiscoConfigSanitizer, load_rules
 from analyzer import analyze_config, save_report
 from platform_compare import build_platform_comparison_reports
+from runtime_loader import load_runtime_for_device
 
 
 CONFIG_EXTENSIONS = ("*.txt", "*.cfg", "*.conf")
@@ -61,6 +62,21 @@ def _parse_args(argv=None):
         action="store_true",
         help="Skip sanitization entirely (input is treated as already-clean).",
     )
+    runtime_group = parser.add_mutually_exclusive_group()
+    runtime_group.add_argument(
+        "--runtime-csv",
+        type=Path,
+        default=None,
+        help="Path to a NetBrain harvest export (CSV or native text). The "
+             "loader filters records by each device's hostname.",
+    )
+    runtime_group.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Directory of NetBrain harvest exports. For each device, every "
+             "file is tried until one yields runtime data for the hostname.",
+    )
     return parser.parse_args(argv)
 
 
@@ -74,6 +90,22 @@ def _validate_args(args):
     platform_files = list(args.platforms.glob("*.yaml")) + list(args.platforms.glob("*.yml"))
     if not platform_files:
         raise FileNotFoundError(f"No platform YAML profiles in {args.platforms}")
+    if args.runtime_csv is not None:
+        if not args.runtime_csv.exists():
+            raise FileNotFoundError(f"Runtime export not found: {args.runtime_csv}")
+        if args.runtime_csv.is_dir():
+            raise IsADirectoryError(
+                f"--runtime-csv expects a file, got a directory: {args.runtime_csv}. "
+                f"Use --runtime-dir instead."
+            )
+    if args.runtime_dir is not None:
+        if not args.runtime_dir.exists():
+            raise FileNotFoundError(f"Runtime directory not found: {args.runtime_dir}")
+        if not args.runtime_dir.is_dir():
+            raise NotADirectoryError(
+                f"--runtime-dir expects a directory, got a file: {args.runtime_dir}. "
+                f"Use --runtime-csv instead."
+            )
 
 
 def _discover_batch_inputs(directory):
@@ -92,8 +124,27 @@ def _discover_batch_inputs(directory):
     return unique
 
 
+def _resolve_runtime_for(hostname, runtime_csv=None, runtime_dir=None):
+    """Look up runtime data for `hostname` from one of the harvest sources.
+
+    Returns the runtime dict or None. With --runtime-dir, files are tried in
+    sorted order; the first file that yields a non-None match wins.
+    """
+    if runtime_csv is not None:
+        return load_runtime_for_device(runtime_csv, hostname)
+    if runtime_dir is not None:
+        for path in sorted(Path(runtime_dir).iterdir()):
+            if not path.is_file():
+                continue
+            out = load_runtime_for_device(path, hostname)
+            if out is not None:
+                return out
+    return None
+
+
 def process_single_device(input_file, output_dir, rules_path, platforms_dir,
-                          *, analyze_sanitized=False, no_sanitize=False, quiet=False):
+                          *, analyze_sanitized=False, no_sanitize=False, quiet=False,
+                          runtime_csv=None, runtime_dir=None):
     """Run the full pipeline against a single config file.
 
     Returns a dict with keys: `device_name`, `output_dir`, `comparison`
@@ -126,6 +177,14 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
 
     analysis_source = sanitized_file if analyze_sanitized else input_file
     report = analyze_config(str(analysis_source))
+    hostname = report.get("inventory", {}).get("hostname") or input_file.stem
+    runtime = _resolve_runtime_for(hostname, runtime_csv, runtime_dir)
+    if runtime is not None:
+        report["runtime"] = runtime
+        if not quiet:
+            print(f"[{input_file.name}] runtime data merged for {hostname}")
+    elif (runtime_csv or runtime_dir) and not quiet:
+        print(f"[{input_file.name}] no runtime records for {hostname}", file=sys.stderr)
     save_report(report, str(report_file))
 
     comparison = build_platform_comparison_reports(
@@ -152,7 +211,8 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
 
 
 def run_batch(input_dir, output_dir, rules_path, platforms_dir,
-              *, analyze_sanitized=False, no_sanitize=False):
+              *, analyze_sanitized=False, no_sanitize=False,
+              runtime_csv=None, runtime_dir=None):
     """Process every config file in `input_dir` and emit a roll-up summary."""
     inputs = _discover_batch_inputs(input_dir)
     if not inputs:
@@ -171,6 +231,8 @@ def run_batch(input_dir, output_dir, rules_path, platforms_dir,
                 analyze_sanitized=analyze_sanitized,
                 no_sanitize=no_sanitize,
                 quiet=True,
+                runtime_csv=runtime_csv,
+                runtime_dir=runtime_dir,
             )
         except Exception as exc:
             print(f"[{path.name}] FAILED: {exc}", file=sys.stderr)
@@ -307,6 +369,8 @@ def main(argv=None):
             args.input, args.output, args.rules, args.platforms,
             analyze_sanitized=args.analyze_sanitized,
             no_sanitize=args.no_sanitize,
+            runtime_csv=args.runtime_csv,
+            runtime_dir=args.runtime_dir,
         )
         print(f"\nBatch summary: {args.output / '_batch_summary.md'}")
     else:
@@ -314,6 +378,8 @@ def main(argv=None):
             args.input, args.output, args.rules, args.platforms,
             analyze_sanitized=args.analyze_sanitized,
             no_sanitize=args.no_sanitize,
+            runtime_csv=args.runtime_csv,
+            runtime_dir=args.runtime_dir,
         )
 
 

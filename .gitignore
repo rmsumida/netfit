@@ -23,8 +23,32 @@ input/*
 !input/.gitkeep
 output/
 
+# Per-session governance logs. May reference internal context that doesn't
+# belong in a public repo. Directory itself preserved via sessions/.gitkeep.
+sessions/*
+!sessions/.gitkeep
+
 # Claude Code / agent scratch (kept local, not shared)
 .claude/
 
 # Local scratch / working drops (sample exports, cross-tool session logs, etc.)
 tmp/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test + static-analysis caches and coverage reports
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# Notebook checkpoints (cheap insurance even with no notebooks today)
+.ipynb_checkpoints/

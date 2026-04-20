@@ -1,0 +1,104 @@
+platform_name: "Cisco_N9K-93180YC-FX3"
+
+capabilities:
+  supported_interface_types:
+    - GigabitEthernet
+    - TenGigabitEthernet
+    - TwentyFiveGigE
+    - FortyGigabitEthernet
+    - HundredGigE
+    - Port-channel
+    - Loopback
+    - Management
+    - SVI
+    # Note: Tunnel intentionally absent. The 93180YC-FX3 runs NX-OS and does
+    # not support GRE/IPsec tunnel interfaces; only VXLAN tunnels (different
+    # abstraction). Configs with `interface Tunnel*` will flag here.
+
+  supports_subinterfaces: true
+
+  supports_trunking: true
+  supports_etherchannel: true
+  supports_spanning_tree: true
+
+  supports_vrf: true
+  supports_ospf: true
+  supports_eigrp: true
+  supports_bgp: true
+  supports_ipv6: true
+
+  supports_hsrp: true
+  supports_vrrp: true
+  supports_glbp: false
+
+  supports_aaa: true
+  supports_tacacs: true
+  supports_radius: true
+  supports_ssh: true
+  supports_management_acl: true
+
+  supports_snmp: true
+  supports_syslog: true
+  supports_ntp: true
+  supports_nat: false
+  supports_dhcp_server: false
+  supports_ip_sla: true
+  supports_object_tracking: true
+  supports_flow_monitoring: true
+
+  supports_qos: true
+
+  supports_crypto: false
+  supports_isakmp: false
+  supports_ikev2: false
+  supports_ipsec: false
+  supports_tunnel_interfaces: false
+
+scale:
+  max_interfaces: 1200
+  max_physical_interfaces: 54
+  max_access_ports: 48
+  max_trunk_ports: 54
+  max_l3_interfaces: 1024
+  max_port_channels: 256
+  max_tunnels: 0
+  max_subinterfaces: 4000
+  max_vrfs: 1024
+  max_bgp_neighbors: 256
+  max_static_routes: 32000
+  max_vlans: 4096
+  ports:
+    native:
+      1G: 0
+      10G: 0
+      25G: 48
+      40G: 0
+      100G: 6
+    breakout:
+      10G_to_10x1G: 0
+      40G_to_4x10G: 0
+      100G_to_4x25G: 6
+    reserved_or_dedicated:
+      management: 1
+
+constraints:
+  intended_role: "data_center_tor"
+
+fit_preferences:
+  role_alignment: "data_center_tor"
+  role_weight: 5
+  throughput_tier: "very_high"
+  throughput_weight: 9
+  services_weight: 3
+  crypto_weight: 0
+  routing_scale_weight: 6
+  switching_bias: "high"
+  branch_bias: "low"
+  aggregation_bias: "high"
+
+notes:
+  - "Tuned planning profile for Cisco Nexus 9300 93180YC-FX3 (NX-OS)."
+  - "48x SFP28 (1/10/25G) + 6x QSFP28 (40/100G); 1.8 Tbps switching."
+  - "Best fit for L2/L3 ToR / leaf switching, VXLAN/EVPN fabrics, and aggregation."
+  - "Not a fit for routed-WAN or VPN refreshes: no NAT, no IPsec, no GRE tunnels, no DHCP server."
+  - "Note: netfit currently parses Cisco IOS / IOS-XE configs only; scoring against a real NX-OS config is gated on the planned NX-OS analyzer front-end."

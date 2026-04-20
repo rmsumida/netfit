@@ -1,0 +1,57 @@
+#--- rtr-edge-01 show inventory Execute at 2026-04-16 17:28:29
+rtr-edge-01>show inventory
+NAME: "Chassis", DESCR: "Cisco ASR1013 Chassis"
+PID: ASR1013         , VID: V01 , SN: XOX1234ABCD
+NAME: "module F1", DESCR: "Cisco ASR1000 Embedded Services Processor, 100G"
+PID: ASR1000-ESP100  , VID: V03 , SN: JJJ12345678
+
+#--- rtr-edge-01 show version Execute at 2026-04-16 17:28:29
+rtr-edge-01>show version
+Cisco IOS XE Software, Version 16.03.07
+ROM: IOS-XE ROMMON
+rtr-edge-01 uptime is 1 year, 24 weeks, 3 days, 12 hours, 8 minutes
+System image file is "bootflash:asr1000rpx86-universalk9.16.03.07.SPA.bin"
+
+#--- rtr-edge-01 show ip route summary Execute at 2026-04-16 17:28:29
+rtr-edge-01>show ip route summary
+IP routing table name is default (0x0)
+Route Source    Networks    Subnets     Replicates  Overhead    Memory (bytes)
+connected       0           24          0           1920        7104
+Total           42          487602      0           39007520    140940980
+
+#--- rtr-edge-01 show ip nat statistics Execute at 2026-04-16 17:28:29
+rtr-edge-01>show ip nat statistics
+Total active translations: 4444 (4437 static, 7 dynamic; 7 extended)
+
+#--- rtr-edge-01 show crypto ipsec sa Execute at 2026-04-16 17:28:29
+rtr-edge-01>show crypto ipsec sa
+interface: Tunnel0
+     inbound esp sas:
+      spi: 0x11111111(286331153)
+        transform: esp-aes esp-sha256-hmac ,
+     outbound esp sas:
+      spi: 0xAABBCCDD(2864434397)
+        transform: esp-aes esp-sha256-hmac ,
+
+#--- rtr-edge-01 show license all Execute at 2026-04-16 17:28:29
+rtr-edge-01>show license all
+License Store: Primary License Storage
+Feature: adventerprise Version: 1.0
+    License Type: RightToUse
+    License State: Active, In Use
+
+#--- rtr-edge-01 show processes cpu sorted Execute at 2026-04-16 17:28:29
+rtr-edge-01>show processes cpu sorted
+CPU utilization for five seconds: 23%/8%; one minute: 19%; five minutes: 18%
+ PID Runtime(ms)     Invoked      uSecs   5Sec   1Min   5Min TTY Process
+ 192   123498234   234982341         52   3.20%  2.85%  2.74%   0 BGP Scanner
+
+#--- rtr-edge-01 show interfaces transceiver Execute at 2026-04-16 17:28:29
+rtr-edge-01>show interfaces transceiver
+                                                       ^
+% Invalid input detected at '^' marker.
+
+#--- rtr-edge-02 show inventory Execute at 2026-04-16 17:30:11
+rtr-edge-02>show inventory
+NAME: "Chassis", DESCR: "Cisco ASR1001-X Chassis"
+PID: ASR1001-X       , VID: V07 , SN: FOX9999ABCD

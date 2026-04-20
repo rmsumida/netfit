@@ -1,0 +1,5 @@
+License Usage:
+  License                 Entitlement Tag                           Count Status
+  -----------------------------------------------------------------------------
+  network-advantage_T1    (NWSTACK_T1)                                  1 IN USE
+  dna-advantage_T1        (DNA_NWStack)                                 1 IN USE

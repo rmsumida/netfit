@@ -1,0 +1,8 @@
+Cisco IOS XE Software, Version 16.03.07
+Cisco IOS Software [Denali], ASR1000 Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 16.3.7
+ROM: IOS-XE ROMMON
+rtr-edge-01 uptime is 1 year, 24 weeks, 3 days, 12 hours, 8 minutes
+System restarted at 00:00:00 UTC Mon Jan 1 2024
+System image file is "bootflash:asr1000rpx86-universalk9.16.03.07.SPA.bin"
+Processor board ID XOX1234ABCD
+Configuration register is 0x2102

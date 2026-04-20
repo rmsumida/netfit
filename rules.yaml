@@ -1,5 +1,5 @@
 sanitize:
-  hostname: false
+  hostname: true
   ip_addresses: true
   usernames: true
   snmp_communities: true
@@ -7,6 +7,21 @@ sanitize:
   tacacs_radius_keys: true
   crypto_keys: true
   email_addresses: true
+  domains: true
+  certificates: true
+  interface_descriptions: true
+  bgp_descriptions: true
+  bgp_peer_groups: true
+  bgp_as_numbers: true
+  crypto_map_names: true
+  route_map_names: true
+  banners: true
+  prefix_list_names: true
+  community_list_names: true
+  vrf_names: true
+  acl_names: true
+  tacacs_server_names: true
+  policy_map_names: true
 
 analyze:
   features:

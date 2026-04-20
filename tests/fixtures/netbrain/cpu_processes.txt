@@ -1,0 +1,6 @@
+CPU utilization for five seconds: 23%/8%; one minute: 19%; five minutes: 18%
+ PID Runtime(ms)     Invoked      uSecs   5Sec   1Min   5Min TTY Process
+ 192   123498234   234982341         52   3.20%  2.85%  2.74%   0 BGP Scanner
+  47    98234123   189234123         51   2.10%  1.95%  1.88%   0 IP Input
+  72     8234234    23498234         48   1.50%  1.42%  1.38%   0 OSPF Hello
+ 311     5123456    18234567         42   0.80%  0.72%  0.68%   0 CEF process

@@ -1,0 +1,5 @@
+License Type: Permanent
+License Level: advipservices
+Next reload license Level: advipservices
+
+License Storage: bootflash:tracelogs/license_data.tlog

@@ -1,0 +1,14 @@
+NAME: "Chassis", DESCR: "Cisco ASR1013 Chassis"
+PID: ASR1013         , VID: V01 , SN: XOX1234ABCD
+NAME: "module 0", DESCR: "Cisco ASR1000 SPA Interface Processor 40"
+PID: ASR1000-SIP40   , VID: V01 , SN: AAA12345678
+NAME: "SPA subslot 0/0", DESCR: "1-port 10 Gigabit Ethernet Shared Port Adapter XFP based"
+PID: SPA-1X10GE-L-V2 , VID: V02 , SN: BBB12345678
+NAME: "subslot 0/0 transceiver 0", DESCR: "10GBASE-SR"
+PID: XFP-10G-MM-SR   , VID: B   , SN: CCC12345678
+NAME: "SPA subslot 0/1", DESCR: "5-port Gigabit Ethernet Shared Port Adapter"
+PID: SPA-5X1GE-V2    , VID: V02 , SN: DDD12345678
+NAME: "subslot 0/1 transceiver 0", DESCR: "GE LX"
+PID: SFP-GE-L        , VID: A   , SN: EEE12345678
+NAME: "module F1", DESCR: "Cisco ASR1000 Embedded Services Processor, 100G"
+PID: ASR1000-ESP100  , VID: V03 , SN: JJJ12345678

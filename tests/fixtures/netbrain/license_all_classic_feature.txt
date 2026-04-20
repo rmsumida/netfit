@@ -1,0 +1,12 @@
+License Store: Primary License Storage
+Feature: adventerprise Version: 1.0
+    License Type: RightToUse
+    License State: Active, In Use
+    License Count: Non-Counted
+    License Priority: None
+
+Feature: ipbase Version: 1.0
+    License Type: Permanent
+    License State: Active, Not in Use
+    License Count: Non-Counted
+    License Priority: Medium

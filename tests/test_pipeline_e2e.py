@@ -129,13 +129,14 @@ def test_analysis_expected_workload_baseline(pipeline_outputs):
 
 def test_comparison_has_all_platforms(pipeline_outputs):
     comparison = pipeline_outputs["comparison"]
-    assert comparison["platform_count"] == 4
+    assert comparison["platform_count"] == 5
     names = {r["platform_name"] for r in comparison["results"]}
     assert names == {
         "Cisco_C8500-12X",
         "Cisco_C8500-12X4QC",
         "Cisco_C8500-20X6C",
         "Cisco_C8500L-8S4X",
+        "Cisco_N9K-93180YC-FX3",
     }
 
 
