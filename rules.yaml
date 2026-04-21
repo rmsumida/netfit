@@ -22,6 +22,8 @@ sanitize:
   acl_names: true
   tacacs_server_names: true
   policy_map_names: true
+  alias_commands: true
+  url_paths: true
 
 analyze:
   features:

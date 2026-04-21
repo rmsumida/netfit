@@ -1555,3 +1555,135 @@ def test_route_map_multiple_wrapper_shapes(sanitizer):
     # Six declared route-maps → six distinct RTMAP_NNN tokens.
     rtmap_tokens = set(re.findall(r"RTMAP_\d{3}", out))
     assert len(rtmap_tokens) == 6
+
+
+# ---------------------------------------------------------------------------
+# URL path + alias redaction (issue #13). `alias exec` macros embed `copy` /
+# `tftp` bodies whose paths carry SP / site / org-path identifiers. URL paths
+# in `archive path` / `logging host` / `copy` commands have the same leak.
+# Fix is layered: drop alias lines entirely, and tokenize each URL path
+# segment as PATHSEG_NNN.
+# ---------------------------------------------------------------------------
+
+def test_alias_exec_line_dropped(sanitizer):
+    # Exact reproduction from the issue — every org identifier in the alias
+    # body must be gone from the sanitized output, and the alias keyword
+    # itself should not appear (the line is dropped, not rewritten).
+    block = (
+        "alias exec wrtftp copy run tftp://10.0.0.1/att/edge/pmtr/dllstxcf/router1-confg\n"
+    )
+    out = sanitizer.sanitize(block)
+    for leak in ("att", "edge", "pmtr", "dllstxcf", "router1", "alias"):
+        assert leak not in out, (
+            f"Alias-line drop leaked {leak!r} in:\n{out}"
+        )
+
+
+def test_alias_configure_line_dropped(sanitizer):
+    # `alias configure` (and other modes) share the same leak surface and
+    # the same zero-value-to-analyzer property — all alias modes drop.
+    block = "alias configure rb router bgp 65001\n"
+    out = sanitizer.sanitize(block)
+    assert "alias" not in out
+    assert out.strip() == ""
+
+
+def test_url_path_segments_tokenized(sanitizer):
+    # Non-alias URL carrying org path — archive path is a common example.
+    # Host gets IP-tokenized; each path segment becomes PATHSEG_NNN.
+    block = "archive path tftp://10.0.0.1/orgpath/sitecode/devicename-confg\n"
+    out = sanitizer.sanitize(block)
+    for leak in ("orgpath", "sitecode", "devicename"):
+        assert leak not in out, f"Leaked {leak!r} in:\n{out}"
+    # Scheme and authority preserved (authority is an IP token).
+    assert "tftp://IP_" in out
+    # Three distinct path segments → three PATHSEG tokens on this line.
+    pathseg_tokens = re.findall(r"PATHSEG_\d{3}", out)
+    assert len(pathseg_tokens) == 3
+
+
+def test_url_path_with_format_specifiers(sanitizer):
+    # `%h-%y%m%d-%H%M%S` is an IOS filename format template. We don't
+    # preserve it verbatim — we just need the sensitive segments
+    # (`configs`, `site-a`) gone.
+    block = "archive path tftp://10.0.0.1/configs/site-a/%h-%y%m%d-%H%M%S\n"
+    out = sanitizer.sanitize(block)
+    for leak in ("configs", "site-a"):
+        assert leak not in out, f"Leaked {leak!r} in:\n{out}"
+
+
+def test_url_path_same_segment_reuses_token(sanitizer):
+    # Two URLs sharing the `configs` segment collapse to the same PATHSEG token.
+    block = (
+        "archive path tftp://10.0.0.1/configs/router-a\n"
+        "logging host tftp://10.0.0.2/configs/router-b\n"
+    )
+    out = sanitizer.sanitize(block)
+    segments = re.findall(r"PATHSEG_\d{3}", out)
+    # `configs` appears twice, `router-a` / `router-b` once each → 3 distinct
+    # tokens across 4 occurrences.
+    assert len(segments) == 4
+    assert len(set(segments)) == 3
+
+
+def test_url_path_http_and_https_schemes(sanitizer):
+    # The leading Cisco command keywords (`ntp server`, `ip http client …`)
+    # are vendor-neutral syntax and must stay visible — only path components
+    # inside the URL are sensitive.
+    block = (
+        "ntp server http://10.0.0.1/pool/internal\n"
+        "ip http client source-interface https://10.0.0.2/mgmt/api\n"
+    )
+    out = sanitizer.sanitize(block)
+    for leak in ("pool", "internal", "mgmt", "api"):
+        assert leak not in out, f"Leaked {leak!r} in:\n{out}"
+    assert "http://IP_" in out
+    assert "https://IP_" in out
+
+
+def test_url_without_path_unchanged(sanitizer):
+    # `tftp://HOST` with no path portion — host goes through IP redaction,
+    # but the URL-path pass has nothing to do.
+    block = "logging host tftp://10.0.0.1\n"
+    out = sanitizer.sanitize(block)
+    assert "tftp://IP_" in out
+    assert "PATHSEG" not in out
+
+
+def test_local_filesystem_url_left_alone(sanitizer):
+    # `flash:`, `bootflash:`, `disk0:`, etc. are local filesystems — the
+    # pattern is deliberately scoped to network-facing schemes. Filenames on
+    # local storage occasionally contain sensitive strings but are out of
+    # scope for this pass (and often appear in `boot system` commands where
+    # rewriting breaks reproducibility).
+    block = "boot system flash:/c3900-universalk9-mz.SPA.152-4.M3.bin\n"
+    out = sanitizer.sanitize(block)
+    assert "flash:/c3900" in out
+    assert "PATHSEG" not in out
+
+
+def test_alias_commands_disabled_via_rules():
+    # With the rule off, alias lines pass through to _sanitize_line. Org
+    # identifiers in the body then leak (which is why the rule exists and
+    # defaults on).
+    rules = {"sanitize": {**RULES["sanitize"], "alias_commands": False}}
+    s = CiscoConfigSanitizer(rules)
+    out = s.sanitize("alias exec wrtftp copy run tftp://10.0.0.1/att/pmtr/x\n")
+    assert "alias exec wrtftp" in out
+
+
+def test_url_paths_disabled_via_rules():
+    # With url_paths off, path segments stay verbatim.
+    rules = {"sanitize": {**RULES["sanitize"], "url_paths": False}}
+    s = CiscoConfigSanitizer(rules)
+    out = s.sanitize("archive path tftp://10.0.0.1/orgpath/sitecode\n")
+    assert "orgpath" in out
+    assert "sitecode" in out
+
+
+def test_url_path_mappings_exported(sanitizer):
+    sanitizer.sanitize("archive path tftp://10.0.0.1/cfg/dc1\n")
+    mappings = sanitizer.get_mappings()
+    assert "url_path_segments" in mappings
+    assert "cfg" in mappings["url_path_segments"]
+    assert "dc1" in mappings["url_path_segments"]

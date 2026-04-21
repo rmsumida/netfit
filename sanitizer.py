@@ -282,6 +282,22 @@ class CiscoConfigSanitizer:
         r'.*\bby\s+\S+\s*$',
         re.IGNORECASE,
     )
+    # Operator-convenience macros (`alias exec`, `alias configure`, …). Bodies
+    # routinely embed SP names, site codes, and org path conventions inside
+    # `copy` / `tftp` arguments. No config-state value to the analyzer —
+    # dropped entirely per issue #13.
+    ALIAS_LINE_PATTERN = re.compile(r'^\s*alias\s+\S+\s+\S+', re.IGNORECASE)
+
+    # URL with path. The path portion after `scheme://authority/` frequently
+    # carries organizational identifiers (SP names, site codes, org-internal
+    # directory structure, device-name filename fragments) that the
+    # host/domain/IP passes can't reach. Matches only the network-facing
+    # schemes — local filesystems (`flash:`, `bootflash:`, `disk0:`, …) are
+    # left alone. Issue #13.
+    URL_WITH_PATH_PATTERN = re.compile(
+        r'((?:tftp|ftp|sftp|scp|https?|rcp)://[^/\s]+)(/[^\s]*)',
+        re.IGNORECASE,
+    )
 
     # Recognize already-redacted markers so we don't re-tokenize them on a
     # second pass and so IP substitution skips over them.
@@ -501,6 +517,7 @@ class CiscoConfigSanitizer:
         certs_enabled = self.rules.get("certificates", True)
         descs_enabled = self.rules.get("interface_descriptions", True)
         banners_enabled = self.rules.get("banners", True)
+        alias_enabled = self.rules.get("alias_commands", True)
         # mode: "normal" | "cert_first_hex" (waiting for first hex line to
         # capture indent) | "cert_skip" (placeholder emitted, swallow rest)
         # | "banner_skip" (placeholder emitted, swallow until closing delim).
@@ -529,6 +546,8 @@ class CiscoConfigSanitizer:
                 if self.CERT_QUIT_PATTERN.match(line):
                     yield line
                     mode = "normal"
+                continue
+            if alias_enabled and self.ALIAS_LINE_PATTERN.match(line):
                 continue
             if certs_enabled and self.CERT_HEADER_PATTERN.match(line):
                 yield line
@@ -627,6 +646,8 @@ class CiscoConfigSanitizer:
         if self.rules.get("ip_addresses", True):
             line = self._sanitize_ipv4(line)
             line = self._sanitize_ipv6(line)
+        if self.rules.get("url_paths", True):
+            line = self._sanitize_url_paths(line)
         return line
 
     def _sanitize_hostname(self, line):
@@ -765,6 +786,29 @@ class CiscoConfigSanitizer:
             rebuilt.append(marker)
             rebuilt.append(sub_segment(next_part))
         return "".join(rebuilt)
+
+    def _sanitize_url_paths(self, line):
+        """Tokenize each non-empty path segment after `scheme://authority/`.
+
+        Scheme + authority are preserved (authority has already been rewritten
+        by the IP / domain / hostname passes if it was sensitive). Path
+        segments are split on `/` and each segment becomes a stable
+        `PATHSEG_NNN` token — same segment value across multiple URLs reuses
+        the same token."""
+        def repl(m):
+            head, path = m.group(1), m.group(2)
+            segments = path.split("/")
+            rewritten = []
+            for seg in segments:
+                if not seg:
+                    rewritten.append(seg)
+                    continue
+                token = self.mapper.get_token(
+                    "url_path_segments", seg, "PATHSEG"
+                )
+                rewritten.append(token)
+            return head + "/".join(rewritten)
+        return self.URL_WITH_PATH_PATTERN.sub(repl, line)
 
     def _sanitize_bgp_as_numbers(self, line):
         # `bgp confederation peers <ASN> [<ASN> ...]` — variable trailing list.
