@@ -85,4 +85,29 @@
 
 ---
 
-*New decisions should be added with sequential numbering (DEC-005, etc.)*
+## DEC-005: Dual-track fixture strategy — greenfield-reference + production-shape fixtures coexist
+
+| Field | Value |
+|-------|-------|
+| Status | LOCKED |
+| Date | 2026-04-20 |
+| Session | 003 |
+
+**Decision:** Lab-generated and public-reference fixtures are maintained on two parallel tracks that serve different purposes and neither deprecates the other:
+- **Greenfield-reference** — represents what new deployments *should* look like (e.g., IKEv2 + per-partner VRF + tunnel protection). Used for architectural documentation and onboarding. First example: `documents/ipsec_pattern_a_spec.md`.
+- **Production-shape** — represents what real production configs actually look like today (e.g., crypto-map legacy IPsec + global-table + BGP peer-group-scoped policy). Used for parser robustness and regression coverage. First example: `documents/crypto_map_global_wan_edge_spec.md`.
+
+Each fixture's `SOURCES.md` labels which track it belongs to.
+
+**Alternatives Considered:**
+1. Only production-shape — Rejected: loses architectural-intent documentation; onboarding material would reflect legacy shapes rather than the direction new work should take.
+2. Only greenfield-reference — Rejected: loses parser coverage on real-world shapes, which is exactly where sanitizer / analyzer bugs surface.
+3. Single blended fixture — Rejected: neither faithful to production nor aspirational for greenfield; serves no audience well.
+
+**Rationale:** Parser robustness and architectural documentation are genuinely different requirements and trying to satisfy both with one fixture family produces a fixture that satisfies neither. The production-shape track exists because real configs are messier than the greenfield ideal; the greenfield track exists because netfit should also be able to show what good looks like.
+
+**Conditions for revisiting:** If the two tracks start drifting in coverage such that one dominates and the other atrophies, reassess whether both are still pulling their weight — but do not collapse them into a single family without an explicit decision.
+
+---
+
+*New decisions should be added with sequential numbering (DEC-006, etc.)*
