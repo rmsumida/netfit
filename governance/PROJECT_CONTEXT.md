@@ -1,7 +1,7 @@
 # netfit — Project Context
 
 > **Purpose:** Single source of truth for every Claude session.
-> Last updated: 2026-04-20 | Session: 003
+> Last updated: 2026-04-21 | Session: 004
 
 ---
 
@@ -29,7 +29,7 @@
 
 - Ship a deterministic, offline pipeline that ranks replacement platforms for a given config (done — Cisco IOS/IOS-XE)
 - Preserve the vendor/OS boundary so new dialects (NX-OS, IOS-XR, Arista, Juniper) can be added without touching assessor / scoring / reporting
-- Keep the 208-test pytest suite green; every sanitizer regex change adds a regression test
+- Keep the 230-test pytest suite green; every sanitizer regex change adds a regression test
 - Same input + same rules + same platforms → byte-identical output, every time
 
 ## 4. Financial Position
