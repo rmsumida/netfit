@@ -263,6 +263,26 @@ class CiscoConfigSanitizer:
     POLICY_MAP_DECLARATION_PATTERN = re.compile(
         r'^policy-map(?:\s+type\s+\S+)?\s+(\S+)\s*$', re.IGNORECASE,
     )
+
+    # Preamble noise emitted before the real config body when a config is
+    # captured via interactive CLI (`show run`). The prompt-echo line leaks
+    # the unredacted hostname. Stripped leading-edge only so that bare `!`
+    # separators mid-config stay intact.
+    PREAMBLE_NOISE_PATTERNS = [
+        # `<hostname>#show running-config` / `sh run` prompt-echo.
+        re.compile(r'^\S+[#>]\s*(?:show|sh)\s+run', re.IGNORECASE),
+        re.compile(r'^Building\s+configuration\.\.\.', re.IGNORECASE),
+        re.compile(r'^Current\s+configuration\s*:\s*\d+\s+bytes\s*$', re.IGNORECASE),
+    ]
+    # Change-tracking header comments. IOS writes these at the top of the
+    # config and they include the operator username who last modified the
+    # device — directly attributable PII. Dropped entirely per issue #11.
+    CHANGE_TRACKING_COMMENT_PATTERN = re.compile(
+        r'^!\s+(?:Last\s+configuration\s+change|NVRAM\s+config\s+last\s+updated)\b'
+        r'.*\bby\s+\S+\s*$',
+        re.IGNORECASE,
+    )
+
     # Recognize already-redacted markers so we don't re-tokenize them on a
     # second pass and so IP substitution skips over them.
     REDACTED_MARKER = re.compile(r'<REDACTED_[A-Z_]+>')
@@ -293,6 +313,12 @@ class CiscoConfigSanitizer:
         self._policy_map_substitutions = []
 
     def sanitize(self, config_text):
+        # Pre-pass: strip show-run CLI preamble (issue #10) and drop
+        # change-tracking header comments that leak the last-modifier's
+        # username (issue #11). Runs before any collection pass so the
+        # hostname embedded in the CLI prompt is gone before the hostname
+        # tokenizer sees the real `hostname X` line.
+        config_text = self._strip_preamble(config_text)
         if self.rules.get("domains", True):
             self._collect_domains(config_text)
         if self.rules.get("bgp_peer_groups", True):
@@ -348,6 +374,35 @@ class CiscoConfigSanitizer:
                 "POLICY",
             )
         return "\n".join(self._sanitize_lines(config_text.splitlines()))
+
+    def _strip_preamble(self, config_text):
+        """Drop show-run CLI preamble + change-tracking header comments.
+
+        1. Walk leading lines and drop each one that matches a known
+           preamble-noise shape (prompt-echo, `Building configuration...`,
+           `Current configuration : N bytes`) or is blank. Stop at the first
+           line that doesn't match — that's the start of real config content
+           (typically a `!` separator or `version N`). This is leading-edge
+           only so mid-config `!` separators and blank lines aren't touched.
+        2. Drop `! Last configuration change ... by <user>` and `! NVRAM
+           config last updated ... by <user>` comments wherever they appear.
+           These carry no config state and leak the last-modifier's operator
+           ID.
+        """
+        lines = config_text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip() or any(
+                p.match(line) for p in self.PREAMBLE_NOISE_PATTERNS
+            ):
+                i += 1
+                continue
+            break
+        return "\n".join(
+            line for line in lines[i:]
+            if not self.CHANGE_TRACKING_COMMENT_PATTERN.match(line)
+        )
 
     def _collect_named_decl(self, config_text, pattern, category, prefix):
         """Generic single-capture name collector. Returns longest-first
@@ -539,31 +594,34 @@ class CiscoConfigSanitizer:
             line = self._sanitize_domains(line)
         if self.rules.get("bgp_descriptions", True):
             line = self._sanitize_bgp_description(line)
-        if self.rules.get("bgp_peer_groups", True) and self._peer_group_substitutions:
-            line = self._sanitize_peer_groups(line)
         if self.rules.get("bgp_as_numbers", True):
             line = self._sanitize_bgp_as_numbers(line)
-        # Route-map substitution runs BEFORE crypto-map substitution because
-        # route-map names sometimes embed crypto-map name substrings (e.g.
-        # `IPvX-EBIZ-LESS-SPECIFIC-TEMP`). If crypto-map ran first, the
-        # collected route-map name would no longer match the rewritten line.
+        # Compound names run BEFORE atomic names (peer-group, crypto-map).
+        # Route-map / prefix-list / ACL identifiers routinely embed peer-group
+        # names and crypto-map names — e.g. `ATT-TO-EBIZ-PMTR` (route-map
+        # wrapping peer-group `EBIZ-PMTR`) or `IPvX-EBIZ-LESS-SPECIFIC-TEMP`
+        # (route-map wrapping crypto-map `EBIZ`). If the atomic pass fires
+        # first it rewrites those substrings in place, the compound
+        # identifier no longer matches, and the organizational wrapper
+        # (`ATT`, `IPvX`) leaks through. Issue #12 is the canonical instance.
         if self.rules.get("route_map_names", True) and self._route_map_substitutions:
             line = self._sanitize_route_maps(line)
-        # Prefix-list and community-list names also embed crypto-map name
-        # substrings in some configs; substitute before crypto-map for the
-        # same reason route-map does.
         if self.rules.get("prefix_list_names", True) and self._prefix_list_substitutions:
             line = self._apply_substitutions(line, self._prefix_list_substitutions)
         if self.rules.get("community_list_names", True) and self._community_list_substitutions:
             line = self._apply_substitutions(line, self._community_list_substitutions)
-        if self.rules.get("vrf_names", True) and self._vrf_substitutions:
-            line = self._apply_substitutions(line, self._vrf_substitutions)
         if self.rules.get("acl_names", True) and self._acl_substitutions:
             line = self._apply_substitutions(line, self._acl_substitutions)
+        if self.rules.get("vrf_names", True) and self._vrf_substitutions:
+            line = self._apply_substitutions(line, self._vrf_substitutions)
         if self.rules.get("tacacs_server_names", True) and self._tacacs_server_substitutions:
             line = self._apply_substitutions(line, self._tacacs_server_substitutions)
         if self.rules.get("policy_map_names", True) and self._policy_map_substitutions:
             line = self._apply_substitutions(line, self._policy_map_substitutions)
+        # Atomic-name passes run AFTER compound names so they only match
+        # standalone occurrences, not substrings inside compound identifiers.
+        if self.rules.get("bgp_peer_groups", True) and self._peer_group_substitutions:
+            line = self._sanitize_peer_groups(line)
         if self.rules.get("crypto_map_names", True) and self._crypto_map_substitutions:
             line = self._sanitize_crypto_maps(line)
         if self.rules.get("ip_addresses", True):

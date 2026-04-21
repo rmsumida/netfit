@@ -1,0 +1,14 @@
+SECRET-EDGE-99#show running-config
+Building configuration...
+
+Current configuration : 1234 bytes
+!
+! Last configuration change at 05:59:34 UTC Fri Apr 10 2026 by mc0823
+! NVRAM config last updated at 06:11:47 UTC Fri Apr 10 2026 by mc0823
+!
+version 16.3
+service password-encryption
+!
+hostname SECRET-EDGE-99
+!
+end

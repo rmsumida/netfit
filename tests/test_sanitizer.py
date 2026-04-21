@@ -5,6 +5,7 @@ group and (b) leave non-secret lines alone even when they contain words like
 "password", "key", or "secret" in descriptions or command names.
 """
 import re
+from pathlib import Path
 
 import pytest
 
@@ -1351,3 +1352,206 @@ def test_load_rules_yaml():
     assert "acl_names" in rules["sanitize"]
     assert "tacacs_server_names" in rules["sanitize"]
     assert "policy_map_names" in rules["sanitize"]
+
+
+# ---------------------------------------------------------------------------
+# Show-run preamble strip (issue #10). Captures taken via interactive CLI
+# include prompt-echo / `Building configuration...` / `Current configuration`
+# lines that leak the device hostname through the prompt. Strip leading-edge
+# noise before any other pass runs.
+# ---------------------------------------------------------------------------
+
+def test_preamble_prompt_echo_stripped(sanitizer):
+    config = (
+        "SECRET-EDGE-99#show running-config\n"
+        "Building configuration...\n"
+        "\n"
+        "Current configuration : 12345 bytes\n"
+        "!\n"
+        "version 16.3\n"
+        "service password-encryption\n"
+    )
+    out = sanitizer.sanitize(config)
+    # Distinctive hostname from prompt does not survive.
+    assert "SECRET-EDGE-99" not in out
+    assert "Building configuration" not in out
+    assert "Current configuration" not in out
+    # Output begins at first `!` or `version`.
+    first_line = out.splitlines()[0]
+    assert first_line == "!" or first_line.startswith("version ")
+
+
+def test_preamble_strip_noop_on_clean_config(sanitizer):
+    # Real config files that start directly at `version` have no preamble.
+    # Pre-pass must be a no-op and leave the first line intact.
+    config = "version 16.3\nservice password-encryption\n"
+    out = sanitizer.sanitize(config)
+    assert out.startswith("version 16.3")
+
+
+def test_preamble_strip_noop_when_starts_mid_config(sanitizer):
+    # A config fragment starting with `interface X` and containing bare `!`
+    # separators later must NOT be stripped to the first `!` — that would
+    # nuke the interface block. Leading-edge-only strip means first line is
+    # already real config, so nothing is dropped.
+    config = (
+        "interface GigabitEthernet0/0/0\n"
+        " ip address 10.0.0.1 255.255.255.0\n"
+        "!\n"
+        "interface GigabitEthernet0/0/1\n"
+    )
+    out = sanitizer.sanitize(config)
+    assert out.startswith("interface GigabitEthernet0/0/0")
+
+
+def test_preamble_prompt_variants(sanitizer):
+    # `sh run`, `sh running-config`, user-mode `>` prompt all variant forms.
+    for prompt_line in (
+        "ROUTER>show running-config",
+        "ROUTER#sh run",
+        "ROUTER(config)#show run",
+    ):
+        config = f"{prompt_line}\n!\nversion 16.3\n"
+        out = sanitizer.sanitize(config)
+        assert "ROUTER" not in out, f"hostname leaked for prompt: {prompt_line!r}"
+
+
+# ---------------------------------------------------------------------------
+# Change-tracking header comments (issue #11). IOS emits `! Last configuration
+# change ... by <user>` and `! NVRAM config last updated ... by <user>` at the
+# top of every running-config and leaks the last-modifier's operator ID. Drop
+# these comments entirely — they carry no config state.
+# ---------------------------------------------------------------------------
+
+def test_change_tracking_comments_dropped(sanitizer):
+    config = (
+        "!\n"
+        "! Last configuration change at 05:59:34 UTC Fri Apr 10 2026 by mc0823\n"
+        "! NVRAM config last updated at 06:11:47 UTC Fri Apr 10 2026 by mc0823\n"
+        "!\n"
+        "version 16.3\n"
+    )
+    out = sanitizer.sanitize(config)
+    assert "mc0823" not in out
+    assert "Last configuration change" not in out
+    assert "NVRAM config last updated" not in out
+    # Surrounding `!` separators and `version` preserved.
+    assert "version 16.3" in out
+
+
+def test_change_tracking_drops_regardless_of_operator_id_shape(sanitizer):
+    # Org-specific username conventions vary — the drop must not depend on
+    # the shape of the trailing token.
+    config = (
+        "! Last configuration change at 12:00:00 UTC Mon Jan 1 2024 by jdoe\n"
+        "! Last configuration change at 12:00:00 UTC Mon Jan 1 2024 by sv-deploy-svc\n"
+        "! NVRAM config last updated at 12:00:00 UTC Mon Jan 1 2024 by ADMIN_001\n"
+        "version 16.3\n"
+    )
+    out = sanitizer.sanitize(config)
+    assert "jdoe" not in out
+    assert "sv-deploy-svc" not in out
+    assert "ADMIN_001" not in out
+
+
+def test_similar_comment_without_by_clause_preserved(sanitizer):
+    # An operator-authored comment without a trailing `by <user>` clause is
+    # not IOS change-tracking metadata — leave it alone.
+    config = (
+        "! Migration notes: see ticket CHG-12345\n"
+        "version 16.3\n"
+    )
+    out = sanitizer.sanitize(config)
+    assert "Migration notes" in out
+
+
+# ---------------------------------------------------------------------------
+# Combined preamble + change-tracking fixture (issues #10 + #11 end-to-end).
+# ---------------------------------------------------------------------------
+
+def test_show_run_with_prompt_fixture():
+    # End-to-end assertion requires the hostname rule to be on — otherwise
+    # the `hostname SECRET-EDGE-99` line in the body would legitimately
+    # leave the hostname visible. The prompt-strip (issue #10) addresses
+    # the leak at the TOP of the file; the normal hostname pass addresses
+    # the body. Both together → hostname gone everywhere.
+    rules = {"sanitize": {**RULES["sanitize"], "hostname": True}}
+    s = CiscoConfigSanitizer(rules)
+    path = Path(__file__).parent / "fixtures" / "sanitizer" / "show_run_with_prompt.txt"
+    out = s.sanitize(path.read_text())
+    # Distinctive hostname from prompt line and body does not survive anywhere.
+    assert "SECRET-EDGE-99" not in out
+    # Operator username from change-tracking headers does not survive.
+    assert "mc0823" not in out
+    # Preamble noise stripped.
+    assert "Building configuration" not in out
+    assert "Current configuration" not in out
+    # Output begins at `!` or `version`.
+    first_line = out.splitlines()[0]
+    assert first_line == "!" or first_line.startswith("version ")
+
+
+# ---------------------------------------------------------------------------
+# Route-map whole-identifier collapse (issue #12). When a route-map name
+# embeds a peer-group name (e.g. `ATT-TO-EBIZ-PMTR`), compound-name
+# substitution must run BEFORE atomic-name substitution; otherwise peer-group
+# rewrites `EBIZ-PMTR → PG_NNN` first, the full route-map identifier no
+# longer matches, and the `ATT` organizational wrapper leaks through.
+# ---------------------------------------------------------------------------
+
+def test_route_map_wrapping_peer_group_collapses_whole(sanitizer):
+    block = (
+        "router bgp 797\n"
+        " neighbor EBIZ-PMTR peer-group\n"
+        "route-map ATT-TO-EBIZ-PMTR permit 10\n"
+        "router bgp 797\n"
+        " neighbor 192.0.2.1 route-map ATT-TO-EBIZ-PMTR out\n"
+    )
+    out = sanitizer.sanitize(block)
+    # Organizational wrapper must not leak.
+    assert "ATT" not in out
+    # Full peer-group name also gone.
+    assert "EBIZ-PMTR" not in out
+    # Route-map declaration and reference collapse to the SAME token.
+    assert out.count("RTMAP_001") == 2
+
+
+def test_route_map_peer_group_first_form(sanitizer):
+    # `<PEERGROUP>-TO-<SUFFIX>` shape — peer-group as prefix, wrapper as suffix.
+    block = (
+        "router bgp 797\n"
+        " neighbor EBIZ-PMTR peer-group\n"
+        "route-map EBIZ-PMTR-TO-ATT permit 10\n"
+    )
+    out = sanitizer.sanitize(block)
+    assert "ATT" not in out
+    assert "EBIZ-PMTR" not in out
+    assert "RTMAP_001" in out
+
+
+def test_route_map_multiple_wrapper_shapes(sanitizer):
+    # Mirrors the 73-occurrence production leak: many route-map names each
+    # wrap peer-group names with varying prefixes/suffixes. Post-fix, every
+    # wrapper substring (ACMECORP, PARTNERX, SITE1) is gone from output.
+    block = (
+        "router bgp 797\n"
+        " neighbor INTERNAL-PG peer-group\n"
+        " neighbor EDGE-PG peer-group\n"
+        "route-map ACMECORP-TO-INTERNAL-PG permit 10\n"
+        "route-map INTERNAL-PG-TO-ACMECORP permit 10\n"
+        "route-map FROM-INTERNAL-PG permit 10\n"
+        "route-map IPv6-TO-EDGE-PG permit 10\n"
+        "route-map INTERNAL-PG-TEST permit 10\n"
+        "route-map EDGE-PG-PARTNERX-SITE1 permit 10\n"
+    )
+    out = sanitizer.sanitize(block)
+    for leak in ("ACMECORP", "PARTNERX", "SITE1"):
+        assert leak not in out, (
+            f"Leaked wrapper substring {leak!r} in sanitized output:\n{out}"
+        )
+    # Peer-group names inside compound route-maps also gone.
+    assert "INTERNAL-PG" not in out
+    assert "EDGE-PG" not in out
+    # Six declared route-maps → six distinct RTMAP_NNN tokens.
+    rtmap_tokens = set(re.findall(r"RTMAP_\d{3}", out))
+    assert len(rtmap_tokens) == 6
