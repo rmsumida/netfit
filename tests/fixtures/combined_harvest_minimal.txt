@@ -1,0 +1,51 @@
+#--- router-test-01 show running-config Execute at 2026-04-21 09:15:00
+router-test-01#show running-config
+Building configuration...
+
+Current configuration : 642 bytes
+!
+version 16.12
+service timestamps debug datetime msec
+service timestamps log datetime msec
+!
+hostname router-test-01
+!
+username operator-bob privilege 15 secret 5 $1$ABCD$xyzLEAKvalueHERE
+!
+ip domain name corp.example.com
+!
+interface GigabitEthernet0/0/0
+ description WAN uplink to edge
+ ip address 203.0.113.10 255.255.255.252
+ no shutdown
+!
+interface GigabitEthernet0/0/1
+ description LAN core
+ ip address 10.10.0.1 255.255.255.0
+ no shutdown
+!
+ip route 0.0.0.0 0.0.0.0 203.0.113.9
+!
+end
+
+#--- router-test-01 show inventory Execute at 2026-04-21 09:15:05
+router-test-01#show inventory
+NAME: "Chassis", DESCR: "Cisco ASR1001-X Chassis"
+PID: ASR1001-X         , VID: V07 , SN: FOX1234ABCD
+
+NAME: "module 0", DESCR: "Cisco ASR1001-X SPA Interface Processor"
+PID: ASR1001-X-SPA     , VID: V02 , SN: JAE5678XYZW
+
+#--- router-test-01 show ip route summary Execute at 2026-04-21 09:15:10
+router-test-01#show ip route summary
+IP routing table name is default (0x0)
+Route Source    Networks    Subnets     Replicates  Overhead    Memory (bytes)
+connected       0           2           0           160         592
+static          0           1           0           80          296
+Total           0           3           0           240         888
+
+#--- router-test-01 show ip nat statistics Execute at 2026-04-21 09:15:15
+router-test-01#show ip nat statistics
+Total active translations: 42 (0 static, 42 dynamic; 0 extended)
+Peak translations: 119, occurred 2d14h ago
+Hits: 98234  Misses: 412
