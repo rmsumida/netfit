@@ -110,4 +110,27 @@ Each fixture's `SOURCES.md` labels which track it belongs to.
 
 ---
 
-*New decisions should be added with sequential numbering (DEC-006, etc.)*
+## DEC-006: Sanitizer covers both config and runtime bodies; runs before parser dispatch in both paths
+
+| Field | Value |
+|-------|-------|
+| Status | LOCKED |
+| Date | 2026-04-21 |
+| Session | 005 |
+
+**Decision:** `CiscoConfigSanitizer` is no longer a config-only tool. In the combined-harvest path, one sanitizer instance is constructed per device and applied to (a) the extracted running-config body and (b) every runtime harvest record body, in both cases **before** any parser or analyzer sees the text. Token-ID counters are instance-level on `TokenMapper`, which means the config and all N runtime bodies share one monotonically-numbered keyspace and one merged `sanitization_mappings.json`. The sanitizer grows explicit `(prefix, secret, suffix)` patterns for runtime-output artifacts (chassis / module serial numbers, license UDI, smart-license Registration Tokens) alongside the existing config-line secret patterns — no generic `\bpassword\b` / `\bkey\b` catch-all is introduced.
+
+**Alternatives Considered:**
+1. Leave the sanitizer config-only and filter runtime-side secrets at the parser — rejected: couples every parser to redaction policy, duplicates sanitizer state, breaks the single-source-of-truth mapping file, and forces parser changes every time sanitizer rules move.
+2. Run a fresh sanitizer instance per body — rejected: token counters would reset to 001 on each body, the same IP seen in the config and in `show ip route` output would get two different tokens, and `sanitization_mappings.json` would need per-body sub-namespaces (or worse, collisions).
+3. Run sanitization only when the input is a combined harvest — rejected: asymmetric behavior between `--runtime-csv` and combined modes, same leak surface remains for two-file workflow users; the runtime patterns are cheap enough to run unconditionally.
+
+**Rationale:** The combined-harvest path fundamentally changes operator expectations. The moment the config and the runtime arrive in one file, "I enabled sanitization" means "sanitize everything in this file" — no reasonable user model treats it otherwise. A single sanitizer instance applied to every body, with instance-level monotonic token counters, keeps the keyspace unified and keeps `sanitization_mappings.json` authoritative. The runtime-specific patterns (SN / UDI / smart-license-token) are draft-validated from sample output in `documents/NETBRAIN_HARVEST.md` and retain the same three-group `(prefix, secret, suffix)` shape as existing secret patterns so the "no generic fallback" invariant continues to hold.
+
+The determinism implication — same combined-harvest input → byte-identical `analysis_report.json` across runs — is guarded by `test_combined_harvest_determinism` in `tests/test_pipeline_e2e.py`. The instance-level counter invariant itself is guarded by `test_sanitizer_token_counter_persists_across_sanitize_calls` in `tests/test_sanitizer.py`.
+
+**Conditions for revisiting:** A future dialect (NX-OS, IOS-XR) whose runtime-output secret shapes can't be reduced to explicit three-group patterns — at which point the decision to revisit is the **three-group convention**, not the "sanitize runtime too" principle.
+
+---
+
+*New decisions should be added with sequential numbering (DEC-007, etc.)*
