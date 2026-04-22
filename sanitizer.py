@@ -133,6 +133,35 @@ SECRET_LINE_PATTERNS = [
 ]
 
 
+# Runtime-output secret patterns. These match mid-line tokens that appear in
+# `show inventory` / `show license udi` / `show license all` output rather
+# than in config commands. Each is a three-group (prefix, secret, suffix)
+# regex consistent with the SECRET_LINE_PATTERNS convention — no generic
+# fallbacks. Applied by _sanitize_runtime_secrets() on every line so the
+# same sanitizer instance covers both config and runtime bodies.
+#
+# Tuple shape: (compiled_regex, mapper_category, token_prefix, rule_name).
+# The final in-text replacement is `<REDACTED_{token}>` where token is the
+# stable `{prefix}_NNN` value issued by the shared TokenMapper.
+#
+# Order matters: UDI runs before SN so `UDI: PID:X SN:Y` is tokenized as a
+# UDI unit before the generic `SN:` pattern would see it.
+RUNTIME_SECRET_PATTERNS = [
+    # `UDI: PID:<pid> SN:<serial>` in show license udi / show version output.
+    (re.compile(r'(UDI:\s*PID:\S+\s+SN:\s*)([A-Z0-9]{8,})(\s|$)'),
+     'license_udis', 'UDI', 'sanitize_license_udi'),
+    # Smart-licensing `Registration Token: <opaque token>` in show license all.
+    (re.compile(r'(Registration Token:\s*)(\S+)(\s|$)'),
+     'smart_license_tokens', 'LICENSE_TOKEN', 'sanitize_smart_license_tokens'),
+    # Chassis / module / transceiver serial numbers in show inventory output,
+    # emitted as `SN: <serial>` on the PID/VID/SN line. Excludes empty-SN
+    # lines (some module entries show `SN:` with no value) via the 8+ char
+    # minimum on the value.
+    (re.compile(r'(SN:\s*)([A-Z0-9]{8,})(\s|$)'),
+     'serial_numbers', 'SERIAL', 'sanitize_serial_numbers'),
+]
+
+
 class CiscoConfigSanitizer:
     IPV4_PATTERN = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
     # IPv6: full 8-group form, or any compressed form using `::`. Lookarounds
@@ -605,6 +634,7 @@ class CiscoConfigSanitizer:
                 or self.rules.get("tacacs_radius_keys", True)
                 or self.rules.get("snmp_communities", True)):
             line = self._sanitize_secrets(line)
+        line = self._sanitize_runtime_secrets(line)
         if self.rules.get("snmp_communities", True):
             line = self._sanitize_snmp_locations(line)
         if self.rules.get("email_addresses", True):
@@ -677,6 +707,29 @@ class CiscoConfigSanitizer:
             if self.REDACTED_MARKER.fullmatch(secret):
                 return line
             return f"{prefix}<REDACTED_{label}>{suffix}"
+        return line
+
+    def _sanitize_runtime_secrets(self, line):
+        """Apply RUNTIME_SECRET_PATTERNS (SN, UDI, smart-license token) to a
+        line, using the shared TokenMapper so the same serial seen in both
+        `show inventory` and `show version` resolves to one stable token.
+
+        Each pattern is independently gated by its rule name; a disabled rule
+        leaves its matches untouched. Matches inside existing `<REDACTED_*>`
+        markers are skipped for idempotency.
+        """
+        for pattern, category, token_prefix, rule_name in RUNTIME_SECRET_PATTERNS:
+            if not self.rules.get(rule_name, True):
+                continue
+
+            def repl(m, category=category, token_prefix=token_prefix):
+                secret = m.group(2)
+                if self.REDACTED_MARKER.fullmatch(secret):
+                    return m.group(0)
+                token = self.mapper.get_token(category, secret, token_prefix)
+                return f"{m.group(1)}<REDACTED_{token}>{m.group(3)}"
+
+            line = pattern.sub(repl, line)
         return line
 
     def _sanitize_snmp_locations(self, line):
