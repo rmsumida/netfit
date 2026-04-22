@@ -1687,3 +1687,140 @@ def test_url_path_mappings_exported(sanitizer):
     assert "url_path_segments" in mappings
     assert "cfg" in mappings["url_path_segments"]
     assert "dc1" in mappings["url_path_segments"]
+
+
+# ---------------------------------------------------------------------------
+# Runtime-output secret patterns: chassis/module serials, license UDI,
+# smart-license registration tokens. Exercised when the sanitizer runs over
+# NetBrain harvest record bodies (issue #14).
+# ---------------------------------------------------------------------------
+
+def test_serial_number_sn_line_tokenized(sanitizer):
+    body = (
+        'NAME: "Chassis", DESCR: "Cisco ASR1001-X Chassis"\n'
+        "PID: ASR1001-X       , VID: V07 , SN: FOX1234ABCD\n"
+    )
+    out = sanitizer.sanitize(body)
+    assert "FOX1234ABCD" not in out
+    assert "<REDACTED_SERIAL_001>" in out
+    mappings = sanitizer.get_mappings()
+    assert mappings["serial_numbers"]["FOX1234ABCD"] == "SERIAL_001"
+
+
+def test_serial_number_left_alone_when_no_sn_prefix(sanitizer):
+    # A bare 8+ char alphanumeric token without the `SN:` prefix must not
+    # be redacted — the rule is keyed on the prefix, not on the shape of
+    # the string.
+    out = sanitizer.sanitize("! routed via FOX1234ABCD core\n")
+    assert "FOX1234ABCD" in out
+    assert "<REDACTED_SERIAL" not in out
+
+
+def test_serial_numbers_disabled_via_rule():
+    rules = {
+        "sanitize": {**RULES["sanitize"], "sanitize_serial_numbers": False},
+    }
+    s = CiscoConfigSanitizer(rules)
+    body = "PID: ASR1001-X       , VID: V07 , SN: FOX1234ABCD\n"
+    out = s.sanitize(body)
+    assert "FOX1234ABCD" in out
+    assert "<REDACTED_SERIAL" not in out
+
+
+def test_license_udi_line_tokenized(sanitizer):
+    out = sanitizer.sanitize("UDI: PID:ASR1001-X SN:FOX9999ABCD\n")
+    assert "FOX9999ABCD" not in out
+    assert "<REDACTED_UDI_001>" in out
+    assert sanitizer.get_mappings()["license_udis"]["FOX9999ABCD"] == "UDI_001"
+
+
+def test_license_udi_left_alone_when_pattern_absent(sanitizer):
+    # No `UDI:` prefix → UDI pattern must not match.
+    out = sanitizer.sanitize("Smart licensing registered\n")
+    assert out == "Smart licensing registered"
+
+
+def test_license_udi_disabled_via_rule():
+    rules = {"sanitize": {**RULES["sanitize"], "sanitize_license_udi": False}}
+    s = CiscoConfigSanitizer(rules)
+    out = s.sanitize("UDI: PID:ASR1001-X SN:FOX9999ABCD\n")
+    # With UDI rule off but serial-numbers rule still on, the trailing SN
+    # portion still gets redacted by the SN pattern — so assert only that
+    # the UDI-specific marker is absent.
+    assert "<REDACTED_UDI_" not in out
+
+
+def test_smart_license_token_tokenized(sanitizer):
+    body = "Registration Token: abcdef1234567890xyz\n"
+    out = sanitizer.sanitize(body)
+    assert "abcdef1234567890xyz" not in out
+    assert "<REDACTED_LICENSE_TOKEN_001>" in out
+
+
+def test_smart_license_token_left_alone_when_pattern_absent(sanitizer):
+    out = sanitizer.sanitize("License Type: Permanent\n")
+    assert out == "License Type: Permanent"
+
+
+def test_smart_license_token_disabled_via_rule():
+    rules = {
+        "sanitize": {**RULES["sanitize"], "sanitize_smart_license_tokens": False},
+    }
+    s = CiscoConfigSanitizer(rules)
+    out = s.sanitize("Registration Token: abcdef1234567890xyz\n")
+    assert "abcdef1234567890xyz" in out
+    assert "<REDACTED_LICENSE_TOKEN" not in out
+
+
+def test_udi_runs_before_serial_number_on_combined_line(sanitizer):
+    # UDI has its own token category; when UDI fires first, the trailing
+    # serial is absorbed into the UDI token and the generic SN pattern
+    # does not fire on that line.
+    out = sanitizer.sanitize("UDI: PID:ASR1001-X SN:FOX9999ABCD\n")
+    assert "<REDACTED_UDI_001>" in out
+    # Generic SERIAL token should not appear here for this serial.
+    mappings = sanitizer.get_mappings()
+    assert "FOX9999ABCD" not in mappings.get("serial_numbers", {})
+
+
+def test_same_serial_same_token_across_calls(sanitizer):
+    # Stable tokenization: same serial in two separate sanitize() calls
+    # resolves to one token.
+    sanitizer.sanitize("PID: ASR1001-X, VID: V07, SN: FOX1234ABCD\n")
+    out2 = sanitizer.sanitize("PID: ASR1001-X, VID: V07, SN: FOX1234ABCD\n")
+    assert "<REDACTED_SERIAL_001>" in out2
+    mappings = sanitizer.get_mappings()
+    # Only one entry for the one unique serial.
+    assert len(mappings["serial_numbers"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Determinism / counter-scope invariant (issue #14 risk #4): when the same
+# CiscoConfigSanitizer processes multiple bodies (config + N runtime records
+# in combined-harvest mode), token ID counters must persist across calls so
+# identifiers remain distinct rather than resetting to 001 each body.
+# ---------------------------------------------------------------------------
+
+def test_sanitizer_token_counter_persists_across_sanitize_calls(sanitizer):
+    """Sanitize body A first (issues IP_001/IP_002), then body B must
+    continue the numbering (IP_003/IP_004) rather than resetting."""
+    body_a = "ip route 10.0.0.0 255.255.255.0 10.0.0.1\n"  # 3 IPs
+    body_b = "ip route 172.16.0.0 255.255.255.0 172.16.0.1\n"  # 3 new IPs
+    out_a = sanitizer.sanitize(body_a)
+    out_b = sanitizer.sanitize(body_b)
+    # body_a should have the low-numbered tokens; body_b should have
+    # strictly higher ones (no reset).
+    ipv4_map = sanitizer.get_mappings()["ipv4"]
+    # 10.0.0.0 and 10.0.0.1 from body_a, 172.16.0.0 and 172.16.0.1 from body_b.
+    # 255.255.255.0 appears in both → one token.
+    a_tokens = [ipv4_map[ip] for ip in ("10.0.0.0", "10.0.0.1")]
+    b_tokens = [ipv4_map[ip] for ip in ("172.16.0.0", "172.16.0.1")]
+    a_nums = [int(t.split("_")[1]) for t in a_tokens]
+    b_nums = [int(t.split("_")[1]) for t in b_tokens]
+    assert max(a_nums) < min(b_nums), (
+        f"Token counter reset between sanitize() calls: body-A tokens "
+        f"{a_tokens} should all be lower than body-B tokens {b_tokens}."
+    )
+    # And the body-B output references the higher-numbered tokens.
+    for token in b_tokens:
+        assert token in out_b

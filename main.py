@@ -17,7 +17,12 @@ from pathlib import Path
 from sanitizer import CiscoConfigSanitizer, load_rules
 from analyzer import analyze_config, save_report
 from platform_compare import build_platform_comparison_reports
-from runtime_loader import load_runtime_for_device
+from runtime_loader import (
+    assemble_runtime_from_records,
+    is_combined_harvest,
+    load_runtime_for_device,
+    split_combined_harvest,
+)
 
 
 CONFIG_EXTENSIONS = ("*.txt", "*.cfg", "*.conf")
@@ -150,6 +155,19 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
     Returns a dict with keys: `device_name`, `output_dir`, `comparison`
     (parsed platform_comparison.json content).
     """
+    # Combined-harvest auto-detection. If the input file's first non-empty
+    # line is a NetBrain `#---` delimiter, treat it as a combined harvest —
+    # the running-config body feeds the normal config pipeline and all other
+    # records feed the runtime pipeline via the shared sanitizer instance.
+    combined_mode = is_combined_harvest(input_file)
+    if combined_mode and (runtime_csv or runtime_dir):
+        raise SystemExit(
+            f"Combined-harvest input detected at {input_file}, but --runtime-csv"
+            f"/--runtime-dir was also provided. These are mutually exclusive — "
+            f"combined harvests carry both config and runtime in one file. Drop "
+            f"the runtime flag or use a non-combined config file."
+        )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -162,8 +180,22 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
     best_fit_md = output_dir / "best_fit_report.md"
     best_fit_html = output_dir / "best_fit_report.html"
 
-    config_text = input_file.read_text(encoding="utf-8", errors="ignore")
+    combined_runtime_records = None
+    combined_hostname = None
+    if combined_mode:
+        config_text, combined_runtime_records, combined_hostname = (
+            split_combined_harvest(input_file)
+        )
+        if config_text is None:
+            raise SystemExit(
+                f"Combined harvest at {input_file} contains no `show running-"
+                f"config` block. Either harvest a running-config and re-run, or "
+                f"use the two-file workflow with --runtime-csv."
+            )
+    else:
+        config_text = input_file.read_text(encoding="utf-8", errors="ignore")
 
+    sanitizer = None
     if no_sanitize:
         sanitized_file.write_text(config_text, encoding="utf-8")
         mappings_file.write_text("{}", encoding="utf-8")
@@ -171,20 +203,57 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
         rules = load_rules(str(rules_path))
         sanitizer = CiscoConfigSanitizer(rules)
         sanitized_file.write_text(sanitizer.sanitize(config_text), encoding="utf-8")
+
+    if combined_mode:
+        # Analyzer always reads config text from disk; in combined-harvest
+        # mode the "original" input file isn't a bare config, so fall back
+        # to the extracted config_text either way. --analyze-sanitized keeps
+        # the sanitized-text path; otherwise we write an unsanitized copy
+        # so the analyzer can parse genuine identifiers.
+        if analyze_sanitized:
+            analysis_source = sanitized_file
+        else:
+            analysis_source = output_dir / "extracted_config.txt"
+            analysis_source.write_text(config_text, encoding="utf-8")
+    else:
+        analysis_source = sanitized_file if analyze_sanitized else input_file
+    report = analyze_config(str(analysis_source))
+    hostname = (
+        combined_hostname
+        or report.get("inventory", {}).get("hostname")
+        or input_file.stem
+    )
+
+    if combined_mode:
+        # Drive the per-record sanitize-then-parse loop from here so the
+        # shared sanitizer tokenizes runtime IPs, serials, and UDIs into the
+        # same mappings file as the config. In --no-sanitize mode the
+        # sanitizer is None and bodies pass through verbatim.
+        body_transform = sanitizer.sanitize if sanitizer is not None else None
+        runtime = assemble_runtime_from_records(
+            combined_runtime_records, body_transform=body_transform
+        )
+        report["runtime"] = runtime
+        if not quiet:
+            print(
+                f"[{input_file.name}] combined-harvest: config + "
+                f"{len(combined_runtime_records)} runtime record(s) merged "
+                f"for {hostname}"
+            )
+    else:
+        runtime = _resolve_runtime_for(hostname, runtime_csv, runtime_dir)
+        if runtime is not None:
+            report["runtime"] = runtime
+            if not quiet:
+                print(f"[{input_file.name}] runtime data merged for {hostname}")
+        elif (runtime_csv or runtime_dir) and not quiet:
+            print(f"[{input_file.name}] no runtime records for {hostname}", file=sys.stderr)
+
+    if sanitizer is not None:
         mappings_file.write_text(
             json.dumps(sanitizer.get_mappings(), indent=2), encoding="utf-8"
         )
 
-    analysis_source = sanitized_file if analyze_sanitized else input_file
-    report = analyze_config(str(analysis_source))
-    hostname = report.get("inventory", {}).get("hostname") or input_file.stem
-    runtime = _resolve_runtime_for(hostname, runtime_csv, runtime_dir)
-    if runtime is not None:
-        report["runtime"] = runtime
-        if not quiet:
-            print(f"[{input_file.name}] runtime data merged for {hostname}")
-    elif (runtime_csv or runtime_dir) and not quiet:
-        print(f"[{input_file.name}] no runtime records for {hostname}", file=sys.stderr)
     save_report(report, str(report_file))
 
     comparison = build_platform_comparison_reports(

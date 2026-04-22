@@ -24,6 +24,9 @@ sanitize:
   policy_map_names: true
   alias_commands: true
   url_paths: true
+  sanitize_serial_numbers: true
+  sanitize_license_udi: true
+  sanitize_smart_license_tokens: true
 
 analyze:
   features:

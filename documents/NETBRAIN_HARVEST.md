@@ -53,6 +53,7 @@ Template name: NETFIT_RUNTIME_MINIMAL_IOSXE_MODERN
 
 Commands:
 ```
+show running-config
 show inventory
 show version
 show interfaces transceiver detail
@@ -71,6 +72,7 @@ Template name: NETFIT_RUNTIME_MINIMAL_ASR1000_16X
 
 Commands:
 ```
+show running-config
 show inventory
 show version
 show ip route summary
@@ -142,6 +144,26 @@ If NetBrain is configured to export CSV instead (or a downstream tool re-shapes 
 **Encoding:** UTF-8 with no BOM preferred. ANSI/cp1252 acceptable but the loader will need a charset hint.
 
 **Multi-line result handling:** the `result` field will contain embedded newlines. The CSV export must quote these correctly per RFC 4180 (field wrapped in `"..."`, internal `"` escaped as `""`). If NetBrain replaces newlines with literal `\n` strings or strips them, that needs to be undone before ingestion.
+
+---
+
+## Combined harvest ingestion
+
+When the NetBrain template harvests `show running-config` alongside the runtime show commands, the exported native-text file carries both the config body and every runtime record in one `#---`-delimited stream. Operators in that workflow point `main.py` at the single file and netfit handles the split internally — no manual pre-slicing and no second `--runtime-csv` argument.
+
+**Auto-detection criterion.** `main.py` peeks at the input file's first non-empty line. If it matches the `#--- <device> <command> Execute at <timestamp>` header regex already owned by the loader, the file is treated as a combined harvest. Any other shape (a bare `hostname` directive, a CSV header row, arbitrary text) falls through to the existing bare-config / two-file code path. The detection logic lives in `runtime_loader.is_combined_harvest()`.
+
+**Hostname inference precedence.** `split_combined_harvest()` resolves the target hostname in this order:
+1. The `device` field of the first `show running-config` record.
+2. If that field disagrees with the `hostname FOO` directive inside the extracted running-config body, the device field wins (it matches the rest of the harvest's records) and a warning is logged. This is the expected precedence — NetBrain scoped the export to that device and labeled every other record with the same device name.
+
+**Sanitizer behavior over runtime data.** In combined-harvest mode, `process_single_device()` constructs a single `CiscoConfigSanitizer` instance and runs `sanitizer.sanitize(body)` over every runtime record *before* dispatching the body to `runtime_parsers.INTENT_PARSERS[intent]`. The same instance also sanitizes the running-config body. Because token-ID counters are instance-level on `TokenMapper`, IPs / serials / UDIs / license tokens seen across all bodies share a single monotonically-numbered keyspace, and the merged result lands in `sanitization_mappings.json` as a unified table. Three runtime-specific (prefix, secret, suffix) patterns — serial numbers (`SN:`), license UDIs (`UDI: PID:X SN:Y`), and smart-license Registration Tokens — are added alongside the existing config secret patterns; each has its own toggle in `rules.yaml`. No generic `\bpassword\b` / `\bkey\b` catch-all exists, per the existing sanitizer invariant.
+
+**startup-config handling.** If the harvest contains `show startup-config` records, they're dropped with an INFO log line: running-config takes precedence. If *only* `show startup-config` is present (no running-config), the splitter returns `(None, None, None)` and `main.py` raises a SystemExit pointing the operator at either harvesting a running-config or using the two-file workflow.
+
+**Multi-device error case.** If the combined harvest contains records for more than one distinct device (case-insensitive hostname compare), `split_combined_harvest()` raises `ValueError` with the device list. netfit currently handles one device per invocation; multi-device harvests are deferred to a future enhancement. The operator's remediation is either to narrow the NetBrain device scope or to pre-split the export.
+
+**Mutual exclusion with `--runtime-csv`.** Combined-harvest auto-detect and `--runtime-csv` / `--runtime-dir` are mutually exclusive. Passing both raises SystemExit before any work is done.
 
 ---
 

@@ -242,6 +242,169 @@ def test_undersized_platforms_still_flag_interface_overflow(pipeline_outputs):
         )
 
 
+# ---------------------------------------------------------------------------
+# Combined-harvest mode (issue #14): single NetBrain file containing both the
+# running-config and the runtime show commands. Pipeline auto-detects on the
+# `#---` delimiter signature and drives the shared-sanitizer sanitize-then-
+# parse loop for runtime records.
+# ---------------------------------------------------------------------------
+
+COMBINED_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "combined_harvest_minimal.txt"
+
+
+@pytest.fixture(scope="module")
+def combined_outputs(tmp_path_factory):
+    from main import process_single_device
+    outdir = tmp_path_factory.mktemp("combined_e2e")
+    process_single_device(
+        COMBINED_FIXTURE,
+        outdir,
+        PROJECT_ROOT / "rules.yaml",
+        PROJECT_ROOT / "platforms",
+        quiet=True,
+    )
+    return {
+        "outdir": outdir,
+        "analysis": json.loads((outdir / "analysis_report.json").read_text()),
+        "mappings": json.loads((outdir / "sanitization_mappings.json").read_text()),
+        "sanitized": (outdir / "sanitized_config.txt").read_text(),
+    }
+
+
+def test_combined_harvest_e2e_produces_runtime_section(combined_outputs):
+    analysis = combined_outputs["analysis"]
+    # Config-derived sections intact.
+    assert "interfaces" in analysis
+    assert "routing" in analysis
+    # Runtime sections populated from the same file.
+    assert "runtime" in analysis
+    runtime = analysis["runtime"]
+    assert runtime["harvest_source"] == "netbrain"
+    assert runtime["inventory"]["chassis_pid"] == "ASR1001-X"
+    assert runtime["nat"]["active_translations"] == 42
+    assert runtime["route_table"]["ipv4_total"] == 3
+
+
+def test_combined_harvest_sanitization_mappings_cover_config_and_runtime(
+    combined_outputs,
+):
+    mappings = combined_outputs["mappings"]
+    # Config-side tokens: the operator username from the config.
+    assert "usernames" in mappings
+    assert "operator-bob" in mappings["usernames"]
+    # Runtime-side tokens: chassis + module serials from show inventory.
+    assert "serial_numbers" in mappings
+    assert "FOX1234ABCD" in mappings["serial_numbers"]
+    assert "JAE5678XYZW" in mappings["serial_numbers"]
+
+
+def test_combined_harvest_runtime_serials_are_tokenized_in_report(combined_outputs):
+    runtime = combined_outputs["analysis"]["runtime"]
+    # The raw serial strings must not survive into the analysis report.
+    raw_serials = ("FOX1234ABCD", "JAE5678XYZW")
+    runtime_str = json.dumps(runtime)
+    for raw in raw_serials:
+        assert raw not in runtime_str, f"Serial {raw} leaked into runtime section"
+    # And the chassis serial in the inventory section is the tokenized marker.
+    assert "<REDACTED_SERIAL_" in runtime["inventory"]["chassis_serial"]
+
+
+def test_combined_harvest_sanitized_file_is_config_body_only(combined_outputs):
+    # sanitized_config.txt holds the sanitized running-config body, not the
+    # full harvest file — no `#---` headers, no runtime show output.
+    sanitized = combined_outputs["sanitized"]
+    assert "#---" not in sanitized
+    assert "Total active translations" not in sanitized
+    # The hostname directive is present (tokenized via the hostname rule).
+    assert "hostname" in sanitized
+
+
+def test_combined_harvest_mutex_with_runtime_csv(tmp_path):
+    from main import process_single_device
+    with pytest.raises(SystemExit) as excinfo:
+        process_single_device(
+            COMBINED_FIXTURE,
+            tmp_path / "out",
+            PROJECT_ROOT / "rules.yaml",
+            PROJECT_ROOT / "platforms",
+            runtime_csv=COMBINED_FIXTURE,
+            quiet=True,
+        )
+    assert "mutually exclusive" in str(excinfo.value)
+
+
+def test_combined_harvest_no_running_config_raises(tmp_path):
+    from main import process_single_device
+    runtime_only = tmp_path / "runtime_only.txt"
+    runtime_only.write_text(
+        "#--- solo-01 show inventory Execute at 2026-04-21 12:00:00\n"
+        "solo-01#show inventory\n"
+        "NAME: \"Chassis\", DESCR: \"Cisco ASR1001-X Chassis\"\n"
+        "PID: ASR1001-X       , VID: V07 , SN: FOX0000ABCD\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        process_single_device(
+            runtime_only,
+            tmp_path / "out",
+            PROJECT_ROOT / "rules.yaml",
+            PROJECT_ROOT / "platforms",
+            quiet=True,
+        )
+    assert "no `show running-config` block" in str(excinfo.value)
+
+
+def test_combined_harvest_determinism(tmp_path):
+    """Determinism invariant (#14 criterion 12): same input, same rules, same
+    platforms → byte-identical analysis_report.json across two runs."""
+    from main import process_single_device
+    out_a = tmp_path / "run_a"
+    out_b = tmp_path / "run_b"
+    for outdir in (out_a, out_b):
+        process_single_device(
+            COMBINED_FIXTURE,
+            outdir,
+            PROJECT_ROOT / "rules.yaml",
+            PROJECT_ROOT / "platforms",
+            quiet=True,
+        )
+    a_bytes = (out_a / "analysis_report.json").read_bytes()
+    b_bytes = (out_b / "analysis_report.json").read_bytes()
+    assert a_bytes == b_bytes, "analysis_report.json differs between identical runs"
+    # Mappings file must also be byte-identical — token IDs are deterministic.
+    m_a = (out_a / "sanitization_mappings.json").read_bytes()
+    m_b = (out_b / "sanitization_mappings.json").read_bytes()
+    assert m_a == m_b, "sanitization_mappings.json differs between identical runs"
+
+
+def test_two_file_workflow_unchanged(tmp_path):
+    """Regression guard: the existing two-file workflow must keep producing
+    the same-shape outputs as before. We run it against the native_export
+    fixture that existing tests already exercise."""
+    from main import process_single_device
+    # Build a minimal config file matching the hostname in the native fixture.
+    cfg = tmp_path / "rtr-edge-01.cfg"
+    cfg.write_text(
+        "!\nhostname rtr-edge-01\n!\n"
+        "interface GigabitEthernet0/0/0\n"
+        " ip address 192.0.2.1 255.255.255.0\n"
+        " no shutdown\n"
+        "!\nend\n",
+        encoding="utf-8",
+    )
+    process_single_device(
+        cfg,
+        tmp_path / "out",
+        PROJECT_ROOT / "rules.yaml",
+        PROJECT_ROOT / "platforms",
+        runtime_csv=PROJECT_ROOT / "tests" / "fixtures" / "netbrain" / "native_export.txt",
+        quiet=True,
+    )
+    analysis = json.loads((tmp_path / "out" / "analysis_report.json").read_text())
+    assert "runtime" in analysis
+    assert analysis["runtime"]["inventory"]["chassis_pid"] == "ASR1013"
+
+
 def test_spanning_tree_not_flagged_for_router_only_config(pipeline_outputs):
     """Regression for the analyzer bug where `spanning-tree extend system-id`
     (a universal IOS default) caused every WAN router to register as having
