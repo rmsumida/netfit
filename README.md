@@ -52,6 +52,16 @@ Process every config in a directory; produces per-device subfolders plus a cross
 python main.py path/to/configs/ --output refresh_2026/
 ```
 
+### Combined-harvest mode (NetBrain single file)
+
+When NetBrain harvests `show running-config` alongside the runtime show commands in one file, drop it directly:
+
+```bash
+python3 main.py input/router_combined_harvest.txt
+```
+
+netfit auto-detects the NetBrain `#---` delimiter signature, splits the file, sanitizes both the config and the runtime bodies, and runs the full pipeline. No flag needed. Mutually exclusive with `--runtime-csv`.
+
 Output structure:
 
 ```

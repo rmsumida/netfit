@@ -86,9 +86,14 @@ pip install -r requirements.txt           # runtime
 pip install -r requirements-dev.txt       # adds pytest
 ```
 
-Single-device run:
+Single-device run (two-file workflow):
 ```bash
-python3 main.py input/router_config.txt
+python3 main.py input/router_config.txt --runtime-csv input/netbrain_harvest.txt
+```
+
+Single-device run (combined NetBrain harvest in one file):
+```bash
+python3 main.py input/router_combined_harvest.txt
 ```
 
 Batch run (directory of `*.txt` / `*.cfg` / `*.conf`):
