@@ -28,62 +28,111 @@ PLATFORMS_DIR = PROJECT_ROOT / "platforms"
 # _allocate_speed_capacity scenarios
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name,source_demand,target_native,expected_ok,expected_unmet", [
-    (
-        "direct_speed_match",
-        {"1G": 5, "10G": 4},
-        {"1G": 5, "10G": 4},
-        True, {},
-    ),
-    (
-        "upward_substitution_1g_uses_10g",
-        {"1G": 10, "10G": 4},
-        {"1G": 5, "10G": 9},  # 5 extra 10G ports absorb the excess 1G demand
-        True, {},
-    ),
-    (
-        "unmet_high_speed_demand",
-        {"1G": 5, "10G": 10},
-        {"1G": 20, "10G": 4},
-        False, {"10G": 6},
-    ),
-    (
-        "partial_headroom",
-        {"1G": 13, "10G": 8},
-        {"1G": 20, "10G": 6},
-        False, {"10G": 2},
-    ),
-    (
-        "single_speed_class_exact_fit",
-        {"10G": 8},
-        {"1G": 0, "10G": 8},
-        True, {},
-    ),
-    (
-        "empty_demand",
-        {},
-        {"1G": 20, "10G": 6},
-        True, {},
-    ),
-    (
-        "high_speed_mix_with_100g",
-        {"1G": 5, "10G": 4, "100G": 2},
-        {"1G": 0, "10G": 4, "100G": 12},
-        True, {},  # 1G borrows from 100G via upward substitution
-    ),
-    (
-        "real_config_baseline",
-        # The committed sample config produces this demand.
-        {"1G": 13, "10G": 8},
-        # C8500-20X6C native supply.
-        {"1G": 20, "10G": 6},
-        False, {"10G": 2},  # 2 10G demand falls short; no higher speeds to borrow
-    ),
-])
+@pytest.mark.parametrize(
+    "name,source_demand,target_native,target_breakout,expected_ok,expected_unmet",
+    [
+        (
+            "direct_speed_match",
+            {"1G": 5, "10G": 4},
+            {"1G": 5, "10G": 4},
+            {},
+            True, {},
+        ),
+        (
+            "upward_substitution_1g_uses_10g",
+            {"1G": 10, "10G": 4},
+            {"1G": 5, "10G": 9},  # 5 extra 10G ports absorb the excess 1G demand
+            {},
+            True, {},
+        ),
+        (
+            "unmet_high_speed_demand",
+            {"1G": 5, "10G": 10},
+            {"1G": 20, "10G": 4},
+            {},
+            False, {"10G": 6},
+        ),
+        (
+            "partial_headroom",
+            {"1G": 13, "10G": 8},
+            {"1G": 20, "10G": 6},
+            {},
+            False, {"10G": 2},
+        ),
+        (
+            "single_speed_class_exact_fit",
+            {"10G": 8},
+            {"1G": 0, "10G": 8},
+            {},
+            True, {},
+        ),
+        (
+            "empty_demand",
+            {},
+            {"1G": 20, "10G": 6},
+            {},
+            True, {},
+        ),
+        (
+            "high_speed_mix_with_100g",
+            {"1G": 5, "10G": 4, "100G": 2},
+            {"1G": 0, "10G": 4, "100G": 12},
+            {},
+            True, {},  # 1G borrows from 100G via upward substitution
+        ),
+        (
+            "real_config_baseline",
+            # Sample config demand. C8500-20X6C corrected native supply.
+            {"1G": 13, "10G": 8},
+            {"10G": 20, "100G": 6},
+            {"100G_to_4x25G": 6},
+            True, {},  # 1G upward-subs into 10G, 10G all-native, all satisfied
+        ),
+        # --- breakout fanout cases (issue #16) ---
+        (
+            "breakout_satisfies_unmet_10g",
+            # 6 native + 4 from one 40G → 4×10G fanout = 10 total
+            {"10G": 10}, {"10G": 6, "40G": 1}, {"40G_to_4x10G": 1},
+            True, {},
+        ),
+        (
+            "breakout_partial_consumption_wastes_children",
+            # Demand 5 → ceil(5/4)=2 parents consumed, yields 8 children;
+            # 5 satisfied, 3 children discarded. Wastage is by design.
+            {"10G": 5}, {"10G": 0, "40G": 2}, {"40G_to_4x10G": 2},
+            True, {},
+        ),
+        (
+            "breakout_falls_back_to_upward_when_no_breakout",
+            # 2 native 1G + 4 upward from 10G = 6 total
+            {"1G": 6}, {"1G": 2, "10G": 4}, {},
+            True, {},
+        ),
+        (
+            "breakout_requires_native_parent_supply",
+            # Breakout slots advertised but no native parent ports → fanout
+            # consumes nothing; falls through to upward (none available) →
+            # remains unmet.
+            {"10G": 4}, {"10G": 0, "40G": 0}, {"40G_to_4x10G": 1},
+            False, {"10G": 4},
+        ),
+        (
+            "real_c8500_12x4qc_sample_workload",
+            # Acceptance test: corrected 12X4QC YAML against the sample
+            # workload (13×1G + 8×10G). Without breakout this reports unmet
+            # 10G; with breakout fanout it should allocate cleanly.
+            {"1G": 13, "10G": 8},
+            {"10G": 12, "40G": 2, "100G": 2},
+            {"40G_to_4x10G": 2, "100G_to_4x25G": 2},
+            True, {},
+        ),
+    ]
+)
 def test_allocate_speed_capacity_scenarios(
-    name, source_demand, target_native, expected_ok, expected_unmet
+    name, source_demand, target_native, target_breakout,
+    expected_ok, expected_unmet,
 ):
-    result = _allocate_speed_capacity(source_demand, target_native, {})
+    result = _allocate_speed_capacity(source_demand, target_native, target_breakout)
     assert result["allocation_ok"] == expected_ok, (
         f"[{name}] allocation_ok mismatch. "
         f"Got {result['allocation_ok']}, expected {expected_ok}. "
@@ -106,8 +155,48 @@ def test_allocate_speed_capacity_preserves_supply_accounting():
     # 3 matched native 1G + 5 matched upward from 10G = 8 total, no unmet.
     assert result["allocation_ok"] is True
     assert result["allocation_detail"]["1G"]["matched_native"] == 3
+    # New disaggregated field name (#16):
+    assert result["allocation_detail"]["1G"]["matched_native_upward"] == 5
+    # Legacy alias (matched_breakout = upward + fanout) preserved:
     assert result["allocation_detail"]["1G"]["matched_breakout"] == 5
+    assert result["allocation_detail"]["1G"]["matched_breakout_fanout"] == 0
     assert result["remaining_supply_by_speed"]["10G"] == 5  # 10 - 5 consumed
+
+
+def test_allocate_speed_capacity_breakout_used_field():
+    """The `breakout_used` dict counts parent slots consumed per breakout key,
+    and the `matched_breakout_fanout` per-speed field counts child ports
+    actually used. Legacy `matched_breakout` = upward + fanout."""
+    result = _allocate_speed_capacity(
+        source_demand_by_speed={"10G": 10},
+        target_native_supply={"10G": 6, "40G": 1},
+        target_breakout={"40G_to_4x10G": 1},
+    )
+    assert result["allocation_ok"] is True
+    assert result["breakout_used"] == {"40G_to_4x10G": 1}
+    assert result["allocation_detail"]["10G"]["matched_native"] == 6
+    assert result["allocation_detail"]["10G"]["matched_breakout_fanout"] == 4
+    assert result["allocation_detail"]["10G"]["matched_native_upward"] == 0
+    # Legacy alias should equal the sum of upward + fanout.
+    assert result["allocation_detail"]["10G"]["matched_breakout"] == 4
+    # The parent 40G port was consumed by the breakout.
+    assert result["remaining_supply_by_speed"]["40G"] == 0
+
+
+def test_allocate_speed_capacity_breakout_consumes_parent_slot_atomically():
+    """Each breakout consumes one parent slot regardless of how many child
+    ports the demand actually uses. Surplus children are discarded — banking
+    them would misrepresent the physical breakout commitment."""
+    result = _allocate_speed_capacity(
+        source_demand_by_speed={"10G": 5},
+        target_native_supply={"10G": 0, "40G": 2},
+        target_breakout={"40G_to_4x10G": 2},
+    )
+    assert result["allocation_ok"] is True
+    # 2 parents consumed (ceil(5/4) = 2), yielding 8 children, 5 used, 3 discarded.
+    assert result["breakout_used"] == {"40G_to_4x10G": 2}
+    assert result["allocation_detail"]["10G"]["matched_breakout_fanout"] == 5
+    assert result["remaining_supply_by_speed"]["40G"] == 0
 
 
 # ---------------------------------------------------------------------------

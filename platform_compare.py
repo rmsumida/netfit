@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from allocation import allocate_speed_capacity
+from allocation import _parse_breakout_key, allocate_speed_capacity
 from assessor import assess_refresh
 
 NETFIT_VERSION = "0.6.0"
@@ -729,21 +729,24 @@ def _platform_detail_lines_md(idx, result):
     if all_speeds:
         lines.append("")
         lines.append("### Demand vs capacity (by speed class)")
-        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Unmet |")
-        lines.append("|-------|---------------|---------------|----------------|----------------|-------|")
+        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Matched via breakout | Unmet |")
+        lines.append("|-------|---------------|---------------|----------------|----------------|----------------------|-------|")
         for speed in _sort_speeds(all_speeds):
             ad = alloc_detail.get(speed, {})
             lines.append(
                 f"| {speed} | {src_demand.get(speed, 0)} | {native_supply.get(speed, 0)} | "
-                f"{ad.get('matched_native', 0)} | {ad.get('matched_breakout', 0)} | "
-                f"{ad.get('unmet', 0)} |"
+                f"{ad.get('matched_native', 0)} | {ad.get('matched_native_upward', 0)} | "
+                f"{ad.get('matched_breakout_fanout', 0)} | {ad.get('unmet', 0)} |"
             )
         lines.append("")
         lines.append(
             "_**Matched native** = demand absorbed by ports of the same speed class. "
-            "**Matched upward** = demand absorbed by a higher speed class via "
-            "substitution (e.g. a 1G demand satisfied by a 10G port). "
-            "**Unmet** = remaining demand with no native or upward capacity._"
+            "**Matched upward** = demand absorbed by a higher-speed native port at 1:1 "
+            "(e.g. a 1G demand satisfied by a 10G port). "
+            "**Matched via breakout** = demand absorbed by fanning out a higher-speed "
+            "port into N child ports of the dest speed (e.g. one 40G port → 4× 10G "
+            "via a `40G_to_4x10G` slot). **Unmet** = remaining demand with no native, "
+            "upward, or breakout capacity._"
         )
 
     lines.append("")
@@ -755,6 +758,21 @@ def _platform_detail_lines_md(idx, result):
     breakout = result.get("breakout", {}) or {}
     lines.append("- **Breakout available:** "
                  + (", ".join(f"{k}={v}" for k, v in breakout.items()) if breakout else "None"))
+    breakout_used = result.get("breakout_used", {}) or {}
+    if breakout_used:
+        consumed_summaries = []
+        for key, parents in breakout_used.items():
+            parsed = _parse_breakout_key(key)
+            if parsed is None:
+                consumed_summaries.append(f"{key}={parents}")
+                continue
+            _, count, dest = parsed
+            consumed_summaries.append(
+                f"{key}={parents} → {parents * count}×{dest} ports yielded"
+            )
+        lines.append("- **Breakout consumed:** " + ", ".join(consumed_summaries))
+    else:
+        lines.append("- **Breakout consumed:** None")
 
     platform_notes = assessment.get("platform_notes", []) or []
     if platform_notes:
@@ -1025,7 +1043,8 @@ def _platform_detail_html(idx, result, is_best_fit):
         parts.append("<h3>Demand vs capacity (by speed class)</h3><table>")
         parts.append(
             "<tr><th>Speed</th><th>Source demand</th><th>Native supply</th>"
-            "<th>Matched native</th><th>Matched upward</th><th>Unmet</th></tr>"
+            "<th>Matched native</th><th>Matched upward</th>"
+            "<th>Matched via breakout</th><th>Unmet</th></tr>"
         )
         for speed in _sort_speeds(all_speeds):
             ad = alloc_detail.get(speed, {})
@@ -1034,7 +1053,8 @@ def _platform_detail_html(idx, result, is_best_fit):
                 f"<td>{_esc(src_demand.get(speed, 0))}</td>"
                 f"<td>{_esc(native_supply.get(speed, 0))}</td>"
                 f"<td>{_esc(ad.get('matched_native', 0))}</td>"
-                f"<td>{_esc(ad.get('matched_breakout', 0))}</td>"
+                f"<td>{_esc(ad.get('matched_native_upward', 0))}</td>"
+                f"<td>{_esc(ad.get('matched_breakout_fanout', 0))}</td>"
                 f"<td>{_esc(ad.get('unmet', 0))}</td></tr>"
             )
         parts.append("</table>")
@@ -1042,9 +1062,12 @@ def _platform_detail_html(idx, result, is_best_fit):
             "<p style='font-size: 12px; color: #57606a; margin-top: -8px;'>"
             "<strong>Matched native</strong> = demand absorbed by ports of the "
             "same speed class. <strong>Matched upward</strong> = demand absorbed "
-            "by a higher speed class via substitution (e.g. a 1G demand satisfied "
-            "by a 10G port). <strong>Unmet</strong> = remaining demand with no "
-            "native or upward capacity.</p>"
+            "by a higher-speed native port at 1:1 (e.g. a 1G demand satisfied by "
+            "a 10G port). <strong>Matched via breakout</strong> = demand absorbed "
+            "by fanning out a higher-speed port into N child ports of the dest "
+            "speed (e.g. one 40G port → 4× 10G via a <code>40G_to_4x10G</code> "
+            "slot). <strong>Unmet</strong> = remaining demand with no native, "
+            "upward, or breakout capacity.</p>"
         )
 
     alloc_ok = result.get("allocation_ok")
@@ -1054,6 +1077,24 @@ def _platform_detail_html(idx, result, is_best_fit):
     if unmet:
         parts.append("<p><strong>Unmet demand:</strong> "
                      + _esc(", ".join(f"{k}={v}" for k, v in unmet.items())) + "</p>")
+    breakout = result.get("breakout", {}) or {}
+    if breakout:
+        parts.append("<p><strong>Breakout available:</strong> "
+                     + _esc(", ".join(f"{k}={v}" for k, v in breakout.items())) + "</p>")
+    breakout_used = result.get("breakout_used", {}) or {}
+    if breakout_used:
+        consumed_summaries = []
+        for key, parents in breakout_used.items():
+            parsed = _parse_breakout_key(key)
+            if parsed is None:
+                consumed_summaries.append(f"{key}={parents}")
+                continue
+            _, count, dest = parsed
+            consumed_summaries.append(
+                f"{key}={parents} → {parents * count}×{dest} ports yielded"
+            )
+        parts.append("<p><strong>Breakout consumed:</strong> "
+                     + _esc(", ".join(consumed_summaries)) + "</p>")
 
     platform_notes = assessment.get("platform_notes", []) or []
     if platform_notes:
@@ -1306,19 +1347,36 @@ def build_best_fit_markdown(comparison, analysis):
     if all_speeds:
         lines.append("## Demand vs capacity (by speed class)")
         lines.append("")
-        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Unmet |")
-        lines.append("|-------|---------------|---------------|----------------|----------------|-------|")
+        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Matched via breakout | Unmet |")
+        lines.append("|-------|---------------|---------------|----------------|----------------|----------------------|-------|")
         for speed in _sort_speeds(all_speeds):
             ad = alloc_detail.get(speed, {})
             lines.append(
                 f"| {speed} | {src_demand.get(speed, 0)} | {native_supply.get(speed, 0)} | "
-                f"{ad.get('matched_native', 0)} | {ad.get('matched_breakout', 0)} | "
-                f"{ad.get('unmet', 0)} |"
+                f"{ad.get('matched_native', 0)} | {ad.get('matched_native_upward', 0)} | "
+                f"{ad.get('matched_breakout_fanout', 0)} | {ad.get('unmet', 0)} |"
             )
         lines.append("")
         lines.append(
-            "_**Matched upward** = a 1G demand satisfied by a 10G port (or 10G→25G/40G/100G, etc.)._"
+            "_**Matched upward** = a higher-speed native port absorbs lower-speed demand at 1:1 "
+            "(e.g. a 10G port serves a 1G demand). **Matched via breakout** = a higher-speed "
+            "port is fanned out into N child ports of the dest speed (e.g. one 40G port → 4× 10G "
+            "via a `40G_to_4x10G` slot)._"
         )
+        breakout_used = result.get("breakout_used", {}) or {}
+        if breakout_used:
+            consumed_summaries = []
+            for key, parents in breakout_used.items():
+                parsed = _parse_breakout_key(key)
+                if parsed is None:
+                    consumed_summaries.append(f"{key}={parents}")
+                    continue
+                _, count, dest = parsed
+                consumed_summaries.append(
+                    f"{key}={parents} → {parents * count}×{dest} ports yielded"
+                )
+            lines.append("")
+            lines.append("**Breakout consumed:** " + ", ".join(consumed_summaries))
         lines.append("")
 
     actionable = _actionable_findings(result["assessment"].get("findings", []) or [])
@@ -1442,7 +1500,8 @@ def build_best_fit_html(comparison, analysis):
             body_parts.append("<h2>Demand vs capacity (by speed class)</h2><table>")
             body_parts.append(
                 "<tr><th>Speed</th><th>Source demand</th><th>Native supply</th>"
-                "<th>Matched native</th><th>Matched upward</th><th>Unmet</th></tr>"
+                "<th>Matched native</th><th>Matched upward</th>"
+                "<th>Matched via breakout</th><th>Unmet</th></tr>"
             )
             for speed in _sort_speeds(all_speeds):
                 ad = alloc_detail.get(speed, {})
@@ -1451,15 +1510,34 @@ def build_best_fit_html(comparison, analysis):
                     f"<td>{_esc(src_demand.get(speed, 0))}</td>"
                     f"<td>{_esc(native_supply.get(speed, 0))}</td>"
                     f"<td>{_esc(ad.get('matched_native', 0))}</td>"
-                    f"<td>{_esc(ad.get('matched_breakout', 0))}</td>"
+                    f"<td>{_esc(ad.get('matched_native_upward', 0))}</td>"
+                    f"<td>{_esc(ad.get('matched_breakout_fanout', 0))}</td>"
                     f"<td>{_esc(ad.get('unmet', 0))}</td></tr>"
                 )
             body_parts.append("</table>")
             body_parts.append(
                 "<p style='font-size: 12px; color: #57606a;'>"
-                "<strong>Matched upward</strong> = a 1G demand satisfied by a 10G "
-                "port (or 10G→25G/40G/100G, etc.).</p>"
+                "<strong>Matched upward</strong> = a higher-speed native port absorbs "
+                "lower-speed demand at 1:1. <strong>Matched via breakout</strong> = a "
+                "higher-speed port is fanned out into N child ports of the dest speed "
+                "(e.g. one 40G port → 4× 10G via a <code>40G_to_4x10G</code> slot).</p>"
             )
+            breakout_used_html = result.get("breakout_used", {}) or {}
+            if breakout_used_html:
+                consumed_summaries = []
+                for key, parents in breakout_used_html.items():
+                    parsed = _parse_breakout_key(key)
+                    if parsed is None:
+                        consumed_summaries.append(f"{key}={parents}")
+                        continue
+                    _, count, dest = parsed
+                    consumed_summaries.append(
+                        f"{key}={parents} → {parents * count}×{dest} ports yielded"
+                    )
+                body_parts.append(
+                    "<p><strong>Breakout consumed:</strong> "
+                    + _esc(", ".join(consumed_summaries)) + "</p>"
+                )
 
         actionable = _actionable_findings(
             result["assessment"].get("findings", []) or []
