@@ -18,8 +18,8 @@ Outputs land in `output/` by default:
 | `sanitized_config.txt` | Redacted copy of the input (IPs / usernames tokenized, secrets replaced with `<REDACTED_*>` markers) |
 | `sanitization_mappings.json` | Token → original mapping table, so you can correlate a sanitized report back to real values |
 | `analysis_report.json` | Structured workload extraction: interfaces, routing, services, scale signals |
-| `platform_comparison.{json,md,html}` | Ranked multi-platform comparison with per-candidate breakdown |
-| `best_fit_report.{md,html}` | Focused single-platform "what should I buy" view scoped to the winning candidate |
+| `platform_comparison.json` | Machine-readable platform comparison (ranked candidates, per-platform findings, score breakdown) — the downstream data artifact |
+| `report.{md,html}` | Unified human-readable hardware-refresh report: verdict, source-device workload, ranked candidates, best-fit detail, migration path, scoring appendix |
 
 ## CLI
 
@@ -71,8 +71,9 @@ refresh_2026/
   device-1/
     sanitized_config.txt
     analysis_report.json
-    platform_comparison.{json,md,html}
-    best_fit_report.{md,html}
+    platform_comparison.json   # machine-readable comparison data
+    report.md                  # unified human-readable report
+    report.html                # same content, styled HTML
   device-2/
     ...
 ```
@@ -113,8 +114,8 @@ sanitizer.py ──► sanitized_config.txt + mappings.json
 analyzer.py ──► analysis_report.json
      │
      ▼
-platform_compare.py ──► platform_comparison.{json,md,html}
-                        best_fit_report.{md,html}
+platform_compare.py ──► platform_comparison.json (machine artifact)
+                        report.{md,html} (unified human-readable report)
    (calls assessor.py per YAML in platforms/)
 ```
 

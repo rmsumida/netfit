@@ -189,10 +189,8 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
     mappings_file = output_dir / "sanitization_mappings.json"
     report_file = output_dir / "analysis_report.json"
     comparison_json = output_dir / "platform_comparison.json"
-    comparison_md = output_dir / "platform_comparison.md"
-    comparison_html = output_dir / "platform_comparison.html"
-    best_fit_md = output_dir / "best_fit_report.md"
-    best_fit_html = output_dir / "best_fit_report.html"
+    report_md = output_dir / "report.md"
+    report_html = output_dir / "report.html"
 
     combined_runtime_records = None
     combined_hostname = None
@@ -279,10 +277,8 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
         analysis_json_path=str(report_file),
         target_profiles_folder=str(platforms_dir),
         comparison_json_output=str(comparison_json),
-        comparison_md_output=str(comparison_md),
-        comparison_html_output=str(comparison_html),
-        best_fit_md_output=str(best_fit_md),
-        best_fit_html_output=str(best_fit_html),
+        report_md_output=str(report_md),
+        report_html_output=str(report_html),
     )
 
     if not quiet:
