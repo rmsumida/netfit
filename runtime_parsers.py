@@ -346,6 +346,180 @@ def parse_cpu_processes(raw_text, source_command=None):
     return out
 
 
+# Media-type → speed-class lookup for transceiver parsing. Embedding the
+# table in the parser keeps the speed_class_refiner module dialect-free.
+# Match prefixes (e.g. "1000BASE-T", "10GBASE-LR") so vendor variants
+# resolve to the right class.
+_TRANSCEIVER_MEDIA_SPEED = (
+    ("1000BASE", "1G"),
+    ("10GBASE", "10G"),
+    ("25GBASE", "25G"),
+    ("40GBASE", "40G"),
+    ("100GBASE", "100G"),
+)
+
+
+def _media_type_to_speed(media_type):
+    if not media_type:
+        return None
+    upper = media_type.upper()
+    for prefix, speed in _TRANSCEIVER_MEDIA_SPEED:
+        if upper.startswith(prefix):
+            return speed
+    return None
+
+
+# Bandwidth (Kbit/sec) → speed-class lookup for `show interfaces` parsing.
+# Exact match by Cisco-reported bandwidth value.
+_BW_KBIT_TO_SPEED = {
+    100000: "100M",
+    1000000: "1G",
+    10000000: "10G",
+    25000000: "25G",
+    40000000: "40G",
+    100000000: "100G",
+}
+
+
+def parse_interfaces_transceiver(raw_text, source_command=None):
+    """Parse `show interfaces transceiver` and `show interfaces transceiver
+    detail`. Returns the runtime.interfaces section's transceiver lookup.
+
+    The table form (no `detail`) carries only optical power readings — those
+    let us know a transceiver is present but not what speed it is. The
+    `detail` form adds a `Media Type:` line per interface, which is the
+    load-bearing field for #17.
+
+    Output:
+        {"transceivers_by_interface": {
+            "TenGigabitEthernet0/0/1": {
+                "media_type": "1000BASE-T",
+                "speed_inferred": "1G",
+                "tx_power_dbm": -2.1,        # nullable
+                "rx_power_dbm": -3.5,        # nullable
+                "temperature_c": 33.4,       # nullable
+            },
+            ...
+        }}
+
+    Per-interface entries appear under whichever form yielded data; both
+    forms can populate the same dict if both are present in the harvest.
+    """
+    out = {}
+
+    # --- Table form: per-interface row with optical metrics ---
+    # Header line includes "Temperature" "Voltage" "Current" "Tx Power" "Rx Power".
+    # Data rows: Port  Temp  Voltage  Current  TxPower  RxPower
+    table_data_re = re.compile(
+        r"^\s*(\S+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*$"
+    )
+    in_data_block = False
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            in_data_block = False
+            continue
+        if "Tx Power" in stripped or "TxPower" in stripped:
+            in_data_block = True
+            continue
+        # Skip the dashed separator under the header.
+        if in_data_block and set(stripped) <= set("- "):
+            continue
+        if not in_data_block:
+            continue
+        m = table_data_re.match(line)
+        if not m:
+            continue
+        port, temp, _voltage, _current, tx, rx = m.groups()
+        try:
+            entry = out.setdefault(port, {})
+            entry["temperature_c"] = float(temp)
+            entry["tx_power_dbm"] = float(tx)
+            entry["rx_power_dbm"] = float(rx)
+        except ValueError:
+            continue
+
+    # --- Detail form: per-interface stanza with Media Type ---
+    # Stanza shape:
+    #   <interface-name>
+    #     Transceiver Type      : SFP
+    #     Media Type            : 1000BASE-T
+    #     ...
+    intf_header_re = re.compile(r"^([A-Za-z]+\S*)\s*$")
+    media_re = re.compile(r"^\s*Media\s+Type\s*:\s*(\S.*?)\s*$", re.IGNORECASE)
+    current_intf = None
+    for line in raw_text.splitlines():
+        m_intf = intf_header_re.match(line)
+        if m_intf:
+            candidate = m_intf.group(1)
+            # Don't pick up table-data rows or random words as an interface
+            # header — interface names start with a known type prefix.
+            if any(candidate.lower().startswith(p) for p in (
+                "gigabit", "tengig", "twentyfivegig", "fortygig", "hundredgig",
+                "fastethernet", "ethernet", "te", "gi", "fa", "fo", "hu",
+            )):
+                current_intf = candidate
+                continue
+        m_media = media_re.match(line)
+        if m_media and current_intf:
+            media = m_media.group(1).strip()
+            entry = out.setdefault(current_intf, {})
+            entry["media_type"] = media
+            speed = _media_type_to_speed(media)
+            if speed:
+                entry["speed_inferred"] = speed
+
+    return {"transceivers_by_interface": out}
+
+
+def parse_interfaces(raw_text, source_command=None):
+    """Parse `show interfaces` (long form). Returns the runtime.interfaces
+    section's operational lookup.
+
+    Per-interface stanza begins with `<name> is <state>, line protocol is
+    <state>` and includes a `BW <kbit> Kbit/sec` line. The `BW` value is
+    used by the speed_class_refiner to detect cases like a TenGigabitEthernet
+    slot driving a 1G optic.
+
+    Output:
+        {"operational_by_interface": {
+            "TenGigabitEthernet0/0/1": {
+                "line_protocol": "up",
+                "bandwidth_kbit": 1000000,
+                "speed_inferred": "1G",
+            },
+            ...
+        }}
+    """
+    out = {}
+
+    intf_header_re = re.compile(
+        r"^(\S+)\s+is\s+\S.*?,\s*line\s+protocol\s+is\s+(\S+)",
+        re.IGNORECASE,
+    )
+    bw_re = re.compile(r"BW\s+(\d+)\s+Kbit", re.IGNORECASE)
+
+    current_intf = None
+    for line in raw_text.splitlines():
+        m_intf = intf_header_re.match(line)
+        if m_intf:
+            current_intf = m_intf.group(1)
+            out.setdefault(current_intf, {})["line_protocol"] = m_intf.group(2).lower()
+            continue
+        if current_intf is None:
+            continue
+        m_bw = bw_re.search(line)
+        if m_bw:
+            kbit = int(m_bw.group(1))
+            entry = out[current_intf]
+            entry["bandwidth_kbit"] = kbit
+            speed = _BW_KBIT_TO_SPEED.get(kbit)
+            if speed:
+                entry["speed_inferred"] = speed
+
+    return {"operational_by_interface": out}
+
+
 INTENT_PARSERS = {
     "inventory": parse_inventory,
     "version": parse_version,
@@ -354,4 +528,6 @@ INTENT_PARSERS = {
     "crypto_ipsec_summary": parse_crypto_ipsec_summary,
     "license_summary": parse_license_summary,
     "cpu_processes": parse_cpu_processes,
+    "interfaces_transceiver": parse_interfaces_transceiver,
+    "interfaces_operational": parse_interfaces,
 }

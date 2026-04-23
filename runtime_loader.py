@@ -34,6 +34,9 @@ ALIAS_MAP = {
     "show license all": "license_summary",
     "show license feature": "license_summary",
     "show processes cpu sorted": "cpu_processes",
+    "show interfaces transceiver": "interfaces_transceiver",
+    "show interfaces transceiver detail": "interfaces_transceiver",
+    "show interfaces": "interfaces_operational",
     # Combined-harvest: the running-config body is extracted as a text block
     # and routed to the config pipeline (not INTENT_PARSERS). The startup-config
     # intent is recognized so the splitter can explicitly drop it; see
@@ -52,6 +55,12 @@ INTENT_TARGETS = {
     "crypto_ipsec_summary": "crypto",
     "license_summary": "license",
     "cpu_processes": "platform",
+    # Both interface intents merge into the same `interfaces` section.
+    # `assemble_runtime_from_records` does setdefault().update(), so the two
+    # parsers' top-level keys (transceivers_by_interface,
+    # operational_by_interface) coexist cleanly.
+    "interfaces_transceiver": "interfaces",
+    "interfaces_operational": "interfaces",
 }
 
 # Intents that do NOT flow through INTENT_PARSERS. These are recognized so the

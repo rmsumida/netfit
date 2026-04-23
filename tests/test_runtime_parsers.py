@@ -11,6 +11,8 @@ from runtime_parsers import (
     parse_crypto_ipsec_summary,
     parse_license_summary,
     parse_cpu_processes,
+    parse_interfaces_transceiver,
+    parse_interfaces,
 )
 
 
@@ -227,3 +229,111 @@ def test_parse_cpu_top_processes():
     bgp = next(p for p in out["top_processes"] if p["name"] == "BGP Scanner")
     assert bgp["pid"] == 192
     assert bgp["cpu_5min_pct"] == pytest.approx(2.74)
+
+
+# -------------------------
+# interfaces transceiver
+# -------------------------
+
+_TRANSCEIVER_SAMPLE = """\
+                            Optical   Optical
+            Temperature  Voltage  Current   Tx Power  Rx Power
+Port           (Celsius)    (Volts)  (mA)      (dBm)     (dBm)
+---------    -----------  -------  --------  --------  --------
+Te0/0/1            33.4     3.31     8.4      -2.1      -3.5
+Te0/0/2            32.1     3.30    10.2       0.4       0.1
+
+TenGigabitEthernet0/0/1
+  Transceiver Type      : SFP+
+  Media Type            : 1000BASE-T
+  Connector Type        : RJ45
+TenGigabitEthernet0/0/2
+  Transceiver Type      : SFP+
+  Media Type            : 10GBASE-LR
+  Connector Type        : LC
+"""
+
+
+def test_parse_interfaces_transceiver_picks_up_table_optical_metrics():
+    out = parse_interfaces_transceiver(_TRANSCEIVER_SAMPLE)
+    by_intf = out["transceivers_by_interface"]
+    assert by_intf["Te0/0/1"]["temperature_c"] == pytest.approx(33.4)
+    assert by_intf["Te0/0/1"]["tx_power_dbm"] == pytest.approx(-2.1)
+    assert by_intf["Te0/0/1"]["rx_power_dbm"] == pytest.approx(-3.5)
+    assert by_intf["Te0/0/2"]["tx_power_dbm"] == pytest.approx(0.4)
+
+
+def test_parse_interfaces_transceiver_infers_speed_from_media_type():
+    out = parse_interfaces_transceiver(_TRANSCEIVER_SAMPLE)
+    by_intf = out["transceivers_by_interface"]
+    assert by_intf["TenGigabitEthernet0/0/1"]["media_type"] == "1000BASE-T"
+    assert by_intf["TenGigabitEthernet0/0/1"]["speed_inferred"] == "1G"
+    assert by_intf["TenGigabitEthernet0/0/2"]["media_type"] == "10GBASE-LR"
+    assert by_intf["TenGigabitEthernet0/0/2"]["speed_inferred"] == "10G"
+
+
+def test_parse_interfaces_transceiver_handles_unknown_media_type():
+    sample = """\
+GigabitEthernet0/0/0
+  Transceiver Type      : SFP
+  Media Type            : SOMETHING-EXOTIC-XYZ
+"""
+    out = parse_interfaces_transceiver(sample)
+    by_intf = out["transceivers_by_interface"]
+    assert by_intf["GigabitEthernet0/0/0"]["media_type"] == "SOMETHING-EXOTIC-XYZ"
+    # No speed_inferred field when the prefix doesn't match the lookup table.
+    assert "speed_inferred" not in by_intf["GigabitEthernet0/0/0"]
+
+
+def test_parse_interfaces_transceiver_table_only_yields_no_speed():
+    """The bare table form (no `detail` keyword) carries optical metrics
+    but no media type — speed_inferred should be absent."""
+    sample = """\
+                            Optical   Optical
+            Temperature  Voltage  Current   Tx Power  Rx Power
+Port           (Celsius)    (Volts)  (mA)      (dBm)     (dBm)
+---------    -----------  -------  --------  --------  --------
+Te0/0/1            33.4     3.31     8.4      -2.1      -3.5
+"""
+    out = parse_interfaces_transceiver(sample)
+    by_intf = out["transceivers_by_interface"]
+    assert "speed_inferred" not in by_intf["Te0/0/1"]
+    assert "media_type" not in by_intf["Te0/0/1"]
+
+
+# -------------------------
+# interfaces (operational)
+# -------------------------
+
+_INTERFACES_SAMPLE = """\
+TenGigabitEthernet0/0/1 is up, line protocol is up
+  Hardware is 10G, address is aabb.cc00.0011
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+TenGigabitEthernet0/0/2 is up, line protocol is up
+  Hardware is 10G, address is aabb.cc00.0022
+  MTU 1500 bytes, BW 10000000 Kbit/sec, DLY 10 usec,
+GigabitEthernet0/0/0 is administratively down, line protocol is down
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+"""
+
+
+def test_parse_interfaces_extracts_line_protocol_and_bandwidth():
+    out = parse_interfaces(_INTERFACES_SAMPLE)
+    by_intf = out["operational_by_interface"]
+    assert by_intf["TenGigabitEthernet0/0/1"]["line_protocol"] == "up"
+    assert by_intf["TenGigabitEthernet0/0/1"]["bandwidth_kbit"] == 1000000
+    assert by_intf["TenGigabitEthernet0/0/1"]["speed_inferred"] == "1G"
+    assert by_intf["TenGigabitEthernet0/0/2"]["bandwidth_kbit"] == 10000000
+    assert by_intf["TenGigabitEthernet0/0/2"]["speed_inferred"] == "10G"
+    assert by_intf["GigabitEthernet0/0/0"]["line_protocol"] == "down"
+
+
+def test_parse_interfaces_handles_unrecognized_bandwidth():
+    sample = """\
+Ethernet1/1 is up, line protocol is up
+  MTU 1500 bytes, BW 99999 Kbit/sec, DLY 10 usec,
+"""
+    out = parse_interfaces(sample)
+    by_intf = out["operational_by_interface"]
+    assert by_intf["Ethernet1/1"]["bandwidth_kbit"] == 99999
+    assert "speed_inferred" not in by_intf["Ethernet1/1"]

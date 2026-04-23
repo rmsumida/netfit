@@ -46,10 +46,32 @@ CPU utilization for five seconds: 23%/8%; one minute: 19%; five minutes: 18%
  PID Runtime(ms)     Invoked      uSecs   5Sec   1Min   5Min TTY Process
  192   123498234   234982341         52   3.20%  2.85%  2.74%   0 BGP Scanner
 
-#--- rtr-edge-01 show interfaces transceiver Execute at 2026-04-16 17:28:29
-rtr-edge-01>show interfaces transceiver
-                                                       ^
-% Invalid input detected at '^' marker.
+#--- rtr-edge-01 show interfaces transceiver detail Execute at 2026-04-16 17:28:29
+rtr-edge-01>show interfaces transceiver detail
+                            Optical   Optical
+            Temperature  Voltage  Current   Tx Power  Rx Power
+Port           (Celsius)    (Volts)  (mA)      (dBm)     (dBm)
+---------    -----------  -------  --------  --------  --------
+Te0/0/1            33.4     3.31     8.4      -2.1      -3.5
+Te0/0/2            32.1     3.30    10.2       0.4       0.1
+
+TenGigabitEthernet0/0/1
+  Transceiver Type      : SFP+
+  Media Type            : 1000BASE-T
+  Connector Type        : RJ45
+TenGigabitEthernet0/0/2
+  Transceiver Type      : SFP+
+  Media Type            : 10GBASE-LR
+  Connector Type        : LC
+
+#--- rtr-edge-01 show interfaces Execute at 2026-04-16 17:28:29
+rtr-edge-01>show interfaces
+TenGigabitEthernet0/0/1 is up, line protocol is up
+  Hardware is 10G, address is aabb.cc00.0011
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+TenGigabitEthernet0/0/2 is up, line protocol is up
+  Hardware is 10G, address is aabb.cc00.0022
+  MTU 1500 bytes, BW 10000000 Kbit/sec, DLY 10 usec,
 
 #--- rtr-edge-02 show inventory Execute at 2026-04-16 17:30:11
 rtr-edge-02>show inventory

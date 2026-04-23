@@ -27,6 +27,7 @@ from runtime_loader import (
     load_runtime_for_device,
     split_combined_harvest,
 )
+from speed_class_refiner import refine_speed_classes
 
 
 _RECOMMENDATION_GLYPH = {
@@ -261,6 +262,11 @@ def process_single_device(input_file, output_dir, rules_path, platforms_dir,
                 print(f"[{input_file.name}] runtime data merged for {hostname}")
         elif (runtime_csv or runtime_dir) and not quiet:
             print(f"[{input_file.name}] no runtime records for {hostname}", file=sys.stderr)
+
+    # Refine per-interface speed classes from runtime data when available.
+    # When no runtime data is present (or no transceiver/operational entries),
+    # this is a no-op and the analyzer's interface-name-based inference stands.
+    refine_speed_classes(report)
 
     if sanitizer is not None:
         mappings_file.write_text(

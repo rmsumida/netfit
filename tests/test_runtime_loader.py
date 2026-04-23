@@ -56,9 +56,10 @@ def test_every_alias_has_a_target():
 def test_split_native_export_recovers_all_blocks():
     text = (FIXTURES / "native_export.txt").read_text(encoding="utf-8")
     records = _split_native_export(text)
-    # 8 blocks for rtr-edge-01 (incl. the % Invalid input one — splitter emits
-    # everything; loader is what filters) + 1 for rtr-edge-02 = 9.
-    assert len(records) == 9
+    # 9 blocks for rtr-edge-01 (inventory, version, route summary, NAT
+    # statistics, crypto, license, CPU, interfaces transceiver detail,
+    # interfaces) + 1 for rtr-edge-02 = 10.
+    assert len(records) == 10
     assert records[0][0] == "rtr-edge-01"
     assert records[0][1] == "show inventory"
     assert records[0][2] == "2026-04-16 17:28:29"
@@ -114,13 +115,30 @@ def test_load_runtime_assembles_expected_sections():
     assert out["license"]["model"] == "classic"
 
 
-def test_load_runtime_skips_invalid_input_block(caplog):
-    path = FIXTURES / "native_export.txt"
+def test_load_runtime_skips_invalid_input_block(caplog, tmp_path):
+    """Synthesized fixture with a `% Invalid input` body — the loader must
+    skip it with a warning, not pass garbage into a parser."""
+    path = tmp_path / "invalid_input_export.txt"
+    path.write_text(
+        "#--- rtr-test-01 show inventory Execute at 2026-04-22 12:00:00\n"
+        'rtr-test-01>show inventory\n'
+        'NAME: "Chassis", DESCR: "Cisco ASR1001-X Chassis"\n'
+        "PID: ASR1001-X         , VID: V07 , SN: FOX0000ABCD\n"
+        "\n"
+        "#--- rtr-test-01 show ip nat statistics Execute at 2026-04-22 12:00:00\n"
+        "rtr-test-01>show ip nat statistics\n"
+        "                                                       ^\n"
+        "% Invalid input detected at '^' marker.\n",
+        encoding="utf-8",
+    )
     with caplog.at_level(logging.WARNING, logger="runtime_loader"):
-        load_runtime_for_device(path, "rtr-edge-01")
-    # The `show interfaces transceiver` block returns "% Invalid input" — it
-    # must be skipped with a warning, not parsed.
+        out = load_runtime_for_device(path, "rtr-test-01")
+    # The valid inventory block should still be parsed.
+    assert out is not None
+    assert out["inventory"]["chassis_pid"] == "ASR1001-X"
+    # The invalid block should produce a warning and not appear in NAT.
     assert any("Invalid input" in rec.getMessage() for rec in caplog.records)
+    assert "nat" not in out
 
 
 def test_load_runtime_filters_to_target_hostname():

@@ -13,6 +13,7 @@ import pytest
 from sanitizer import CiscoConfigSanitizer, load_rules
 from analyzer import analyze_config, save_report
 from platform_compare import build_platform_comparison_reports
+from speed_class_refiner import refine_speed_classes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +41,10 @@ def pipeline_outputs(tmp_path_factory):
     mappings.write_text(json.dumps(sanitizer.get_mappings(), indent=2))
 
     report = analyze_config(str(input_config))
+    # Mirror main.py: refine speed classes from runtime data before save.
+    # No runtime is merged in this fixture, so the refiner is a no-op
+    # except for writing summary.speed_class_inference.
+    refine_speed_classes(report)
     save_report(report, str(analysis))
 
     build_platform_comparison_reports(
@@ -417,3 +422,93 @@ def test_spanning_tree_not_flagged_for_router_only_config(pipeline_outputs):
         "router config. The only STP line in the sample is "
         "'spanning-tree extend system-id' which is a default directive."
     )
+
+
+# ---------------------------------------------------------------------------
+# Speed-class refinement (issue #17): runtime data reclassifies demand from
+# the analyzer's name-based default (TenGigabitEthernet → 10G) to the
+# transceiver-derived value (e.g. a 10G slot running a 1G optic → 1G demand).
+# ---------------------------------------------------------------------------
+
+TRANSCEIVER_FIXTURE = (
+    PROJECT_ROOT / "tests" / "fixtures" / "combined_harvest_with_transceiver.txt"
+)
+
+
+def test_combined_harvest_speed_class_inference_refines_demand(tmp_path):
+    """The fixture has 2 active TenGigabitEthernet interfaces; the
+    transceiver harvest declares 1× 1000BASE-T and 1× 10GBASE-LR. The
+    refiner should reclassify the first to 1G, leaving the rolled-up
+    counter at {1G:1, 10G:1} instead of the analyzer's name-based {10G:2}."""
+    from main import process_single_device
+    process_single_device(
+        TRANSCEIVER_FIXTURE,
+        tmp_path / "out",
+        PROJECT_ROOT / "rules.yaml",
+        PROJECT_ROOT / "platforms",
+        quiet=True,
+    )
+    analysis = json.loads((tmp_path / "out" / "analysis_report.json").read_text())
+
+    # Refined per-speed counter — transceiver overrides interface-name default.
+    assert analysis["interfaces"]["active_physical_by_speed_class"] == {"1G": 1, "10G": 1}
+
+    # Inference summary populated; both refinements came from transceiver data.
+    inference = analysis["summary"]["speed_class_inference"]
+    assert inference["by_transceiver"] == 2
+    assert inference["by_operational"] == 0
+    assert inference["by_interface_type"] == 0
+
+    # Per-interface audit fields preserve the analyzer's original call.
+    details = analysis["interfaces"]["details"]
+    by_name = {d["name"]: d for d in details}
+    assert by_name["TenGigabitEthernet0/0/1"]["effective_speed_class"] == "1G"
+    assert by_name["TenGigabitEthernet0/0/1"]["effective_speed_class_source"] == "transceiver"
+    assert by_name["TenGigabitEthernet0/0/1"]["effective_speed_class_original"] == "10G"
+    assert by_name["TenGigabitEthernet0/0/2"]["effective_speed_class"] == "10G"
+    assert by_name["TenGigabitEthernet0/0/2"]["effective_speed_class_source"] == "transceiver"
+
+
+def test_no_runtime_path_leaves_speed_classes_at_analyzer_defaults(pipeline_outputs):
+    """The seeded sample run has no runtime data — the refiner should be a
+    no-op and inference should be entirely by_interface_type."""
+    analysis = pipeline_outputs["analysis"]
+    inference = analysis["summary"].get("speed_class_inference")
+    assert inference is not None, "Refiner should always write the inference summary"
+    assert inference["by_transceiver"] == 0
+    assert inference["by_operational"] == 0
+    assert inference["by_interface_type"] == analysis["interfaces"]["active_physical_count"]
+    # Every active physical detail should record interface_type as the source.
+    for d in analysis["interfaces"]["details"]:
+        if d.get("is_active") and d.get("is_physical"):
+            assert d["effective_speed_class_source"] == "interface_type"
+
+
+def test_two_file_workflow_uses_transceiver_data_when_present(tmp_path):
+    """The native_export.txt fixture now carries real `show interfaces
+    transceiver detail` output. The two-file workflow should pick that up
+    and reclassify rtr-edge-01's TenGigabitEthernet0/0/1 to 1G."""
+    from main import process_single_device
+    cfg = tmp_path / "rtr-edge-01.cfg"
+    cfg.write_text(
+        "!\nhostname rtr-edge-01\n!\n"
+        "interface TenGigabitEthernet0/0/1\n"
+        " ip address 192.0.2.1 255.255.255.0\n"
+        " no shutdown\n!\n"
+        "interface TenGigabitEthernet0/0/2\n"
+        " ip address 192.0.2.5 255.255.255.0\n"
+        " no shutdown\n!\nend\n",
+        encoding="utf-8",
+    )
+    process_single_device(
+        cfg,
+        tmp_path / "out",
+        PROJECT_ROOT / "rules.yaml",
+        PROJECT_ROOT / "platforms",
+        runtime_csv=PROJECT_ROOT / "tests" / "fixtures" / "netbrain" / "native_export.txt",
+        quiet=True,
+    )
+    analysis = json.loads((tmp_path / "out" / "analysis_report.json").read_text())
+    by_speed = analysis["interfaces"]["active_physical_by_speed_class"]
+    # 0/0/1 has a 1000BASE-T optic, 0/0/2 has a 10GBASE-LR optic.
+    assert by_speed == {"1G": 1, "10G": 1}
