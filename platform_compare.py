@@ -641,6 +641,33 @@ def _device_context_lines_md(analysis):
             "- **Active physical by speed:** "
             + ", ".join(f"{k}={by_speed[k]}" for k in _sort_speeds(by_speed.keys()))
         )
+    inference = summary.get("speed_class_inference") or {}
+    if inference:
+        parts_inf = []
+        for src, count in (
+            ("by_interface_type", inference.get("by_interface_type", 0)),
+            ("by_transceiver", inference.get("by_transceiver", 0)),
+            ("by_operational", inference.get("by_operational", 0)),
+        ):
+            if count:
+                parts_inf.append(f"{count} from {src.removeprefix('by_')}")
+        if parts_inf:
+            lines.append("- **Speed-class inference:** " + ", ".join(parts_inf))
+            refined = inference.get("by_transceiver", 0) + inference.get("by_operational", 0)
+            if refined > 0:
+                lines.append(
+                    f"    - _{refined} interface(s) had their speed class refined "
+                    f"from runtime data (e.g., a 10G slot running a 1G optic). "
+                    f"See per-interface `effective_speed_class_source` in "
+                    f"`analysis_report.json`._"
+                )
+            elif inference.get("by_interface_type", 0) > 0:
+                lines.append(
+                    "    - _All speed classes inferred from interface type names. "
+                    "Provide `show interfaces` or `show interfaces transceiver` "
+                    "harvest output to refine demand using actual transceiver / "
+                    "operational speed and avoid over- or under-stating port-mix needs._"
+                )
     lines.append(f"- **Active subinterfaces:** {interfaces.get('active_subinterfaces', 0)}")
     lines.append(f"- **Active tunnels:** {interfaces.get('active_tunnels', 0)}")
     lines.append(f"- **Active port-channels:** {interfaces.get('active_port_channels', 0)}")
@@ -939,6 +966,39 @@ def _device_context_html(analysis):
          _esc(", ".join(f"{k}={v}" for k, v in sorted(by_type.items())) or "—")),
         ("Active physical by speed",
          _esc(", ".join(f"{k}={by_speed[k]}" for k in _sort_speeds(by_speed.keys())) or "—")),
+    ]
+    inference = summary.get("speed_class_inference") or {}
+    if inference:
+        parts_inf = []
+        for src, count in (
+            ("interface_type", inference.get("by_interface_type", 0)),
+            ("transceiver", inference.get("by_transceiver", 0)),
+            ("operational", inference.get("by_operational", 0)),
+        ):
+            if count:
+                parts_inf.append(f"{count} from {src}")
+        if parts_inf:
+            inference_value = ", ".join(parts_inf)
+            refined = inference.get("by_transceiver", 0) + inference.get("by_operational", 0)
+            if refined > 0:
+                inference_value += (
+                    f"<br><span style='font-size: 12px; color: #57606a;'>"
+                    f"<em>{refined} interface(s) had their speed class refined "
+                    f"from runtime data (e.g., a 10G slot running a 1G optic). "
+                    f"See per-interface <code>effective_speed_class_source</code> "
+                    f"in <code>analysis_report.json</code>.</em></span>"
+                )
+            elif inference.get("by_interface_type", 0) > 0:
+                inference_value += (
+                    "<br><span style='font-size: 12px; color: #57606a;'>"
+                    "<em>All speed classes inferred from interface type names. "
+                    "Provide <code>show interfaces</code> or "
+                    "<code>show interfaces transceiver</code> harvest output to "
+                    "refine demand and avoid over- or under-stating port-mix needs."
+                    "</em></span>"
+                )
+            rows.append(("Speed-class inference", inference_value))
+    rows += [
         ("Active subinterfaces", _esc(interfaces.get("active_subinterfaces", 0))),
         ("Active tunnels", _esc(interfaces.get("active_tunnels", 0))),
         ("Active port-channels", _esc(interfaces.get("active_port_channels", 0))),
