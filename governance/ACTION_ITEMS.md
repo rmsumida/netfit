@@ -7,7 +7,7 @@
 > - Claude updates this at the end of each session
 > - Between sessions: `claude "Mark items X and Y as complete in governance/ACTION_ITEMS.md"`
 >
-> Last updated: 2026-04-21 | Session: 005
+> Last updated: 2026-04-22 | Session: 006
 
 ---
 
