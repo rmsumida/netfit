@@ -1,6 +1,8 @@
 import json
 import yaml
 
+from allocation import allocate_speed_capacity
+
 
 SEVERITY_SCORES = {
     "critical": 40,
@@ -137,6 +139,44 @@ def assess_refresh(analysis, target):
             f"but target {target_name} supports {max_physical_interfaces}.",
             "Choose a higher-scale platform, modular option, or redesign interface allocation."
         ))
+
+    # Speed-class allocation: do source-device demand by speed class fit into
+    # the target platform's native port supply (with upward substitution)?
+    # Without this finding, an unmet 10G demand was invisible to the verdict
+    # and a platform with port-mix gaps could still earn LIKELY_FIT.
+    active_physical_by_speed_class = (
+        _get(analysis, ["interfaces", "active_physical_by_speed_class"], {}) or {}
+    )
+    target_native_supply = scale.get("ports", {}).get("native", {}) or {}
+    if active_physical_by_speed_class and target_native_supply:
+        alloc = allocate_speed_capacity(
+            active_physical_by_speed_class, target_native_supply
+        )
+        if not alloc["allocation_ok"]:
+            unmet = alloc["unmet_demand"]
+            unmet_high = sum(v for k, v in unmet.items() if k in ("40G", "100G"))
+            unmet_mid = sum(v for k, v in unmet.items() if k in ("10G", "25G"))
+            unmet_low = sum(v for k, v in unmet.items() if k == "1G")
+            unmet_str = ", ".join(f"{k}={v}" for k, v in unmet.items())
+            if unmet_high:
+                severity = "high"
+            elif unmet_mid:
+                severity = "high"
+            elif unmet_low:
+                severity = "medium"
+            else:
+                severity = "low"
+            findings.append(make_finding(
+                "interfaces",
+                severity,
+                "Port-speed demand exceeds target native supply",
+                f"Source device needs {sum(active_physical_by_speed_class.values())} "
+                f"physical ports across speed classes; after upward substitution, "
+                f"{unmet_str} cannot be satisfied by {target_name} native ports.",
+                "Plan a port-mix conversion (breakout, line-card swap, or transceiver "
+                "rationalization) or pick a platform whose native supply matches the "
+                "demand profile."
+            ))
 
     if max_access_ports is not None and current_l2_access > max_access_ports:
         findings.append(make_finding(
@@ -727,17 +767,10 @@ def assess_refresh(analysis, target):
             "Validate throughput, encrypted throughput, routing scale, and license entitlements for the target platform."
         ))
 
-    # --------------------------------------------------
-    # Informational findings
-    # --------------------------------------------------
-    for note in notes:
-        findings.append(make_finding(
-            "notes",
-            "info",
-            "Target platform note",
-            str(note),
-            "Review this platform note during migration planning."
-        ))
+    # Platform notes (descriptive metadata about the target) are surfaced as a
+    # separate `platform_notes` field on the assessment, not as info-severity
+    # findings — they aren't gap analysis and used to dilute the findings list.
+    platform_notes = [str(note) for note in notes]
 
     # --------------------------------------------------
     # Final scoring
@@ -769,7 +802,8 @@ def assess_refresh(analysis, target):
             "finding_counts": severity_counts,
             "current_hostname": _get(analysis, ["summary", "hostname"], "UNKNOWN")
         },
-        "findings": findings
+        "findings": findings,
+        "platform_notes": platform_notes,
     }
 
     return result
