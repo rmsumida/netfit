@@ -796,8 +796,12 @@ def analyze_config(file_path):
         if uplink_like > 0:
             considerations.append("High-speed uplink interfaces detected; verify transceiver/media compatibility on replacement hardware.")
 
-    report["refresh_risks"] = _unique_sorted(risks)
-    report["migration_considerations"] = _unique_sorted(considerations)
+    # Refresh risks and migration considerations are appended in roughly
+    # severity/category order above. Dedupe while preserving that insertion
+    # order so the most action-relevant items render first instead of being
+    # alphabetized to the bottom.
+    report["refresh_risks"] = list(dict.fromkeys(risks))
+    report["migration_considerations"] = list(dict.fromkeys(considerations))
 
     # -------------------------
     # Summary

@@ -16,13 +16,26 @@ from pathlib import Path
 
 from sanitizer import CiscoConfigSanitizer, load_rules
 from analyzer import analyze_config, save_report
-from platform_compare import build_platform_comparison_reports
+from platform_compare import (
+    NETFIT_VERSION,
+    _generation_timestamp,
+    build_platform_comparison_reports,
+)
 from runtime_loader import (
     assemble_runtime_from_records,
     is_combined_harvest,
     load_runtime_for_device,
     split_combined_harvest,
 )
+
+
+_RECOMMENDATION_GLYPH = {
+    "LIKELY_FIT": "✅",
+    "CONDITIONAL_FIT": "⚠️",
+    "HIGH_RISK": "⛔",
+    "NOT_RECOMMENDED": "❌",
+    "UNKNOWN": "❓",
+}
 
 
 CONFIG_EXTENSIONS = ("*.txt", "*.cfg", "*.conf")
@@ -368,6 +381,10 @@ def _build_batch_summary(device_results):
             }
 
     return {
+        "metadata": {
+            "generated_at": _generation_timestamp(),
+            "netfit_version": NETFIT_VERSION,
+        },
         "device_count": len(device_results),
         "successful": sum(1 for d in devices if "error" not in d),
         "failed": sum(1 for d in devices if "error" in d),
@@ -379,8 +396,15 @@ def _build_batch_summary(device_results):
 def _render_batch_markdown(summary):
     devices = summary.get("devices", [])
     matrix = summary.get("platform_fit_matrix", {})
+    metadata = summary.get("metadata", {})
 
     lines = ["# Batch Refresh Comparison", ""]
+    if metadata:
+        lines.append(
+            f"_Generated {metadata.get('generated_at', 'UNKNOWN')} by netfit "
+            f"{metadata.get('netfit_version', 'UNKNOWN')}._"
+        )
+        lines.append("")
     lines.append(
         f"**{summary['successful']}** of **{summary['device_count']}** devices processed successfully."
     )
@@ -415,6 +439,11 @@ def _render_batch_markdown(summary):
         lines.append("")
         lines.append("Fitness scores (higher is better) across all devices.")
         lines.append("")
+        glyph_legend = ", ".join(
+            f"{glyph} {label}" for label, glyph in _RECOMMENDATION_GLYPH.items()
+        )
+        lines.append(f"_Cell glyph: {glyph_legend}._")
+        lines.append("")
         header = "| Platform | " + " | ".join(device_names) + " |"
         sep = "|----------|" + "|".join(["---"] * len(device_names)) + "|"
         lines.append(header)
@@ -423,7 +452,13 @@ def _render_batch_markdown(summary):
             cells = []
             for device in device_names:
                 cell = matrix[platform].get(device)
-                cells.append(f"{cell['fitness_score']:.0f}" if cell else "—")
+                if cell:
+                    glyph = _RECOMMENDATION_GLYPH.get(
+                        cell.get("overall_recommendation"), "❓"
+                    )
+                    cells.append(f"{glyph} {cell['fitness_score']:.0f}")
+                else:
+                    cells.append("—")
             lines.append(f"| {platform} | " + " | ".join(cells) + " |")
 
     return "\n".join(lines) + "\n"

@@ -6,13 +6,18 @@ result in JSON, Markdown, and HTML.
 
 Pipeline entry point: `build_platform_comparison_reports` (bottom of file).
 """
+import datetime
 import html
 import json
+import os
 from pathlib import Path
 
 import yaml
 
+from allocation import allocate_speed_capacity
 from assessor import assess_refresh
+
+NETFIT_VERSION = "0.6.0"
 
 
 # ---------------------------------------------------------------------------
@@ -139,73 +144,118 @@ def _bool_str(value, yes="Yes", no="No"):
 
 
 # ---------------------------------------------------------------------------
-# Speed-capacity allocation
+# Speed-capacity allocation (kept as module-level alias so existing imports
+# `from platform_compare import _allocate_speed_capacity` continue to work).
 # ---------------------------------------------------------------------------
 
 def _allocate_speed_capacity(source_demand_by_speed, target_native_supply, target_breakout):
-    """Allocate source speed demand against target native supply with upward
-    substitution (1G → {10G,25G,40G,100G}; 10G → {25G,40G,100G}; 25G → {40G,100G};
-    40G → {100G}). Breakout slots are advertised in the return value but not yet
-    consumed — breakout math is a known gap.
+    return allocate_speed_capacity(source_demand_by_speed, target_native_supply, target_breakout)
 
-    Returns a dict with:
-      allocation_ok (bool), unmet_demand (dict), allocation_detail (dict),
-      breakout_used (dict), remaining_supply_by_speed (dict).
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+def _generation_timestamp():
+    """ISO-8601 UTC timestamp for output provenance.
+
+    Honors SOURCE_DATE_EPOCH (reproducible-builds standard) so tests/CI can
+    pin a fixed timestamp for byte-equality checks. Falls back to current UTC.
     """
-    demand = dict(source_demand_by_speed)
-    supply = dict(target_native_supply)
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if epoch:
+        try:
+            ts = datetime.datetime.fromtimestamp(int(epoch), tz=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            ts = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        ts = datetime.datetime.now(datetime.timezone.utc)
+    return ts.replace(microsecond=0).isoformat()
 
-    allocation_detail = {
-        speed: {"matched_native": 0, "matched_breakout": 0, "unmet": 0}
-        for speed in ("100M", "1G", "10G", "25G", "40G", "100G")
-    }
 
-    upward_substitutes = {
-        "1G": ["10G", "25G", "40G", "100G"],
-        "10G": ["25G", "40G", "100G"],
-        "25G": ["40G", "100G"],
-        "40G": ["100G"],
-        "100G": [],
-    }
-
-    for speed in ("1G", "10G", "25G", "40G", "100G"):
-        need = demand.get(speed, 0)
-        if need <= 0:
-            continue
-
-        available_native = supply.get(speed, 0)
-        matched = min(need, available_native)
-        if matched > 0:
-            allocation_detail[speed]["matched_native"] = matched
-            supply[speed] -= matched
-            need -= matched
-
-        for alt_speed in upward_substitutes[speed]:
-            if need <= 0:
-                break
-            available_alt = supply.get(alt_speed, 0)
-            matched_alt = min(need, available_alt)
-            if matched_alt > 0:
-                allocation_detail[speed]["matched_breakout"] += matched_alt
-                supply[alt_speed] -= matched_alt
-                need -= matched_alt
-
-        if need > 0:
-            allocation_detail[speed]["unmet"] = need
-
-    unmet_demand = {
-        speed: detail["unmet"]
-        for speed, detail in allocation_detail.items()
-        if detail["unmet"] > 0
-    }
-
+def _build_metadata(analysis):
     return {
-        "allocation_ok": not unmet_demand,
-        "unmet_demand": unmet_demand,
-        "allocation_detail": allocation_detail,
-        "breakout_used": {},
-        "remaining_supply_by_speed": supply,
+        "generated_at": _generation_timestamp(),
+        "netfit_version": NETFIT_VERSION,
+        "source_hostname": analysis.get("summary", {}).get("hostname", "UNKNOWN"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Score-breakdown grouping (compact rendering for MD/HTML)
+# ---------------------------------------------------------------------------
+
+# Each group is (label, list-of-keyword-substrings). The first group whose
+# keyword matches a row's factor string claims it. Order matters — verdict
+# checks live before workload/feature checks so general substrings don't
+# poach verdict rows.
+_BREAKDOWN_GROUPS = (
+    ("Verdict & risk", (
+        "Overall recommendation:", "Critical findings:", "High findings:",
+        "Medium findings:", "Low findings:", "Total risk score:",
+    )),
+    ("Capacity & allocation", (
+        "Physical interface capacity", "Physical interface usage",
+        "Subinterface capacity", "Subinterface usage", "Subinterfaces",
+        "Unsupported interface types", "Unsupported interface type findings",
+        "Speed matching", "Supply ratio", "Unmet high-speed", "Unmet mid/low-speed",
+    )),
+    ("Scale headroom", ("headroom",)),
+    ("Role alignment", (
+        "Intended role is WAN edge", "Role alignment", "Branch bias",
+        "High scale WAN edge", "WAN edge role and WAN interfaces",
+    )),
+    ("Workload weights", (
+        "Throughput weight", "Routing scale weight",
+        "Services weight", "Crypto weight",
+    )),
+    ("Workload signals", (
+        "BGP present", "NAT present", "Crypto present", "QoS present",
+        "L3 > access", "BGP and tunnels", "BGP and VRF", "NAT and crypto",
+        "Access count",
+    )),
+    ("Hardware-fit features", (
+        "port-channel support", "management port", "LAN deployment",
+    )),
+)
+
+
+def _classify_breakdown_row(factor):
+    for label, keywords in _BREAKDOWN_GROUPS:
+        for kw in keywords:
+            if kw in factor:
+                return label
+    return "Other"
+
+
+def _group_breakdown(breakdown):
+    """Bin each (factor, impact) row into a category, summing impacts and
+    keeping a couple of contributing examples for the table cell.
+
+    Returns a list of dicts in display order: each `{label, impact, members}`.
+    """
+    bins = {label: {"impact": 0.0, "members": []} for label, _ in _BREAKDOWN_GROUPS}
+    bins["Other"] = {"impact": 0.0, "members": []}
+
+    for factor, impact in breakdown:
+        label = _classify_breakdown_row(factor)
+        bins[label]["impact"] += impact
+        bins[label]["members"].append((factor, impact))
+
+    out = []
+    order = [label for label, _ in _BREAKDOWN_GROUPS] + ["Other"]
+    for label in order:
+        b = bins[label]
+        if not b["members"]:
+            continue
+        # Show the two largest-magnitude contributors.
+        sorted_members = sorted(b["members"], key=lambda x: -abs(x[1]))[:2]
+        out.append({
+            "label": label,
+            "impact": round(b["impact"], 2),
+            "examples": sorted_members,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +599,7 @@ def compare_platforms(analysis, target_profiles):
     )
 
     return {
+        "metadata": _build_metadata(analysis),
         "device_hostname": analysis.get("summary", {}).get("hostname", "UNKNOWN"),
         "platform_count": len(results),
         "top_ranked_platform": results[0]["platform_name"] if results else None,
@@ -658,12 +709,18 @@ def _platform_detail_lines_md(idx, result):
             lines.append("- **Top bonuses:** "
                          + ", ".join(f"{b[0]} ({b[1]:+g})" for b in bonuses))
 
-        lines.append("")
-        lines.append("### Score breakdown")
-        lines.append("| Factor | Impact |")
-        lines.append("|--------|--------|")
-        for factor, impact in breakdown:
-            lines.append(f"| {factor} | {impact:+g} |")
+        groups = _group_breakdown(breakdown)
+        if groups:
+            lines.append("")
+            lines.append("### Score drivers (grouped)")
+            lines.append("| Driver | Net impact | Largest contributors |")
+            lines.append("|--------|-----------:|----------------------|")
+            for g in groups:
+                examples = "; ".join(f"{name} ({val:+g})" for name, val in g["examples"])
+                lines.append(f"| {g['label']} | {g['impact']:+g} | {examples} |")
+            lines.append("")
+            lines.append("_Full per-row breakdown is available in `platform_comparison.json` "
+                         "under each result's `score_breakdown` field._")
 
     src_demand = result.get("source_demand", {}) or {}
     native_supply = result.get("native_supply", {}) or {}
@@ -681,6 +738,13 @@ def _platform_detail_lines_md(idx, result):
                 f"{ad.get('matched_native', 0)} | {ad.get('matched_breakout', 0)} | "
                 f"{ad.get('unmet', 0)} |"
             )
+        lines.append("")
+        lines.append(
+            "_**Matched native** = demand absorbed by ports of the same speed class. "
+            "**Matched upward** = demand absorbed by a higher speed class via "
+            "substitution (e.g. a 1G demand satisfied by a 10G port). "
+            "**Unmet** = remaining demand with no native or upward capacity._"
+        )
 
     lines.append("")
     lines.append("### Allocation outcome")
@@ -691,6 +755,13 @@ def _platform_detail_lines_md(idx, result):
     breakout = result.get("breakout", {}) or {}
     lines.append("- **Breakout available:** "
                  + (", ".join(f"{k}={v}" for k, v in breakout.items()) if breakout else "None"))
+
+    platform_notes = assessment.get("platform_notes", []) or []
+    if platform_notes:
+        lines.append("")
+        lines.append("### About this platform")
+        for note in platform_notes:
+            lines.append(f"- {note}")
 
     findings = assessment.get("findings", []) or []
     if findings:
@@ -720,8 +791,14 @@ def build_comparison_markdown(comparison, analysis):
     top_ranked = comparison.get("top_ranked_platform")
     recommended = comparison.get("recommended_platform")
     results = comparison.get("results", [])
+    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
 
     lines = ["# Multi-Platform Refresh Comparison", ""]
+    lines.append(
+        f"_Generated {metadata.get('generated_at', 'UNKNOWN')} by netfit "
+        f"{metadata.get('netfit_version', 'UNKNOWN')}._"
+    )
+    lines.append("")
     lines.append("## Executive Summary")
     lines.append("")
     lines.append(f"- **Device hostname:** {hostname}")
@@ -917,11 +994,28 @@ def _platform_detail_html(idx, result, is_best_fit):
                          + "</li>")
         parts.append("</ul>")
 
-        parts.append("<h3>Score breakdown</h3><table>")
-        parts.append("<tr><th>Factor</th><th style='width: 120px;'>Impact</th></tr>")
-        for factor, impact in breakdown:
-            parts.append(f"<tr><td>{_esc(factor)}</td><td>{impact:+g}</td></tr>")
-        parts.append("</table>")
+        groups = _group_breakdown(breakdown)
+        if groups:
+            parts.append("<h3>Score drivers (grouped)</h3><table>")
+            parts.append(
+                "<tr><th>Driver</th><th style='width: 110px; text-align: right;'>"
+                "Net impact</th><th>Largest contributors</th></tr>"
+            )
+            for g in groups:
+                examples = "; ".join(
+                    f"{_esc(name)} ({val:+g})" for name, val in g["examples"]
+                )
+                parts.append(
+                    f"<tr><td>{_esc(g['label'])}</td>"
+                    f"<td style='text-align: right;'>{g['impact']:+g}</td>"
+                    f"<td>{examples}</td></tr>"
+                )
+            parts.append("</table>")
+            parts.append(
+                "<p style='font-size: 12px; color: #57606a; margin-top: -8px;'>"
+                "Full per-row breakdown is available in <code>platform_comparison.json</code>"
+                " under each result's <code>score_breakdown</code> field.</p>"
+            )
 
     src_demand = result.get("source_demand", {}) or {}
     native_supply = result.get("native_supply", {}) or {}
@@ -944,6 +1038,14 @@ def _platform_detail_html(idx, result, is_best_fit):
                 f"<td>{_esc(ad.get('unmet', 0))}</td></tr>"
             )
         parts.append("</table>")
+        parts.append(
+            "<p style='font-size: 12px; color: #57606a; margin-top: -8px;'>"
+            "<strong>Matched native</strong> = demand absorbed by ports of the "
+            "same speed class. <strong>Matched upward</strong> = demand absorbed "
+            "by a higher speed class via substitution (e.g. a 1G demand satisfied "
+            "by a 10G port). <strong>Unmet</strong> = remaining demand with no "
+            "native or upward capacity.</p>"
+        )
 
     alloc_ok = result.get("allocation_ok")
     unmet = result.get("unmet_demand", {}) or {}
@@ -952,6 +1054,12 @@ def _platform_detail_html(idx, result, is_best_fit):
     if unmet:
         parts.append("<p><strong>Unmet demand:</strong> "
                      + _esc(", ".join(f"{k}={v}" for k, v in unmet.items())) + "</p>")
+
+    platform_notes = assessment.get("platform_notes", []) or []
+    if platform_notes:
+        parts.append("<h3>About this platform</h3><ul>")
+        parts.extend(f"<li>{_esc(note)}</li>" for note in platform_notes)
+        parts.append("</ul>")
 
     findings = assessment.get("findings", []) or []
     if findings:
@@ -984,8 +1092,12 @@ def build_comparison_html(comparison, analysis):
     best_fit = comparison.get("best_fit_platform")
     results = comparison.get("results", [])
 
+    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
     body_parts = [
         "<h1>Multi-Platform Refresh Comparison</h1>",
+        f'<p style="font-size: 12px; color: #57606a; margin-top: -8px;">'
+        f"Generated {_esc(metadata.get('generated_at', 'UNKNOWN'))} by netfit "
+        f"{_esc(metadata.get('netfit_version', 'UNKNOWN'))}.</p>",
         '<div class="summary-box">',
         f"<p><strong>Device hostname:</strong> {_esc(hostname)}</p>",
         f"<p><strong>Platforms compared:</strong> {_esc(comparison.get('platform_count', 0))}</p>",
@@ -1073,12 +1185,60 @@ def _find_best_fit_result(comparison):
     return None
 
 
+def _actionable_findings(findings):
+    """Return findings that drive migration decisions — drops info notes and
+    headroom advisories so the migration-path section reads as a punch list,
+    not a status dump."""
+    return [
+        f for f in findings
+        if f.get("severity") in ("critical", "high", "medium")
+        or (f.get("severity") == "low" and "approaching" not in f.get("title", "").lower())
+    ]
+
+
+def _validation_checklist_items(result, analysis):
+    """Compose a short pre-cutover checklist from assessor findings and
+    analyzer-identified refresh risks. Deduplicated; ordered for action."""
+    items = []
+    seen = set()
+
+    def _add(text):
+        normalized = text.strip()
+        if normalized and normalized not in seen:
+            items.append(normalized)
+            seen.add(normalized)
+
+    findings = result.get("assessment", {}).get("findings", []) or []
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    for f in sorted(findings, key=lambda x: severity_order.get(x.get("severity"), 4)):
+        if f.get("severity") in ("critical", "high", "medium"):
+            rec = f.get("recommendation")
+            if rec:
+                _add(rec)
+
+    unmet = result.get("unmet_demand", {}) or {}
+    if unmet:
+        unmet_str = ", ".join(f"{v}× {k}" for k, v in unmet.items())
+        _add(
+            f"Resolve unmet port demand ({unmet_str}) via breakout cabling, "
+            f"transceiver mix change, or supplemental line cards."
+        )
+
+    for risk in analysis.get("refresh_risks", []) or []:
+        _add(risk)
+
+    return items
+
+
 def build_best_fit_markdown(comparison, analysis):
-    """Short focused report answering 'what should I buy for this device, and
-    why?' — just the winning platform plus enough source-device context to
-    justify it. Intended for stakeholders who don't want the full comparison."""
+    """Stakeholder-facing answer to 'what should I buy for this device?'.
+
+    Differs from the comparison report's per-platform section: scoped to the
+    winning platform, action-oriented (validation checklist, migration-path
+    findings), with the full per-row breakdown elided."""
     result = _find_best_fit_result(comparison)
     hostname = comparison.get("device_hostname", "UNKNOWN")
+    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
 
     lines = [f"# Hardware Refresh — Best Fit for `{hostname}`", ""]
 
@@ -1090,12 +1250,14 @@ def build_best_fit_markdown(comparison, analysis):
     summary = result["assessment"].get("assessment_summary", {})
     rec = summary.get("overall_recommendation", "UNKNOWN")
     is_recommended = recommended == result["platform_name"]
+    alloc_ok = result.get("allocation_ok", True)
 
     lines.append("## Verdict")
     lines.append("")
     lines.append(f"- **Recommended platform:** **{result['platform_name']}**")
     lines.append(f"- **Overall recommendation:** {rec}")
     lines.append(f"- **Fitness score:** {result['fitness_score']}")
+    lines.append(f"- **Port-allocation status:** {'PASS' if alloc_ok else 'FAIL — see Migration Path'}")
     lines.append(f"- **Source profile:** `{result.get('source_file', '')}`")
     if not is_recommended:
         lines.append("")
@@ -1109,13 +1271,94 @@ def build_best_fit_markdown(comparison, analysis):
     lines.extend(_device_context_lines_md(analysis))
     lines.append("")
 
-    lines.extend(_platform_detail_lines_md(1, result))
-    return "\n".join(lines)
+    platform_notes = result["assessment"].get("platform_notes", []) or []
+    if platform_notes:
+        lines.append("## About this platform")
+        lines.append("")
+        for note in platform_notes:
+            lines.append(f"- {note}")
+        lines.append("")
+
+    breakdown = result.get("score_breakdown", []) or []
+    if breakdown:
+        penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
+        bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
+        lines.append("## Why this won")
+        lines.append("")
+        if bonuses:
+            lines.append("**Top bonuses:** "
+                         + ", ".join(f"{b[0]} ({b[1]:+g})" for b in bonuses))
+        if penalties:
+            lines.append("")
+            lines.append("**Top penalties:** "
+                         + ", ".join(f"{p[0]} ({p[1]:+g})" for p in penalties))
+        lines.append("")
+        lines.append(
+            "_Full ranked comparison and score breakdown across all candidates is in_ "
+            "`platform_comparison.md` _and_ `platform_comparison.json`_._"
+        )
+        lines.append("")
+
+    src_demand = result.get("source_demand", {}) or {}
+    native_supply = result.get("native_supply", {}) or {}
+    alloc_detail = result.get("allocation_detail", {}) or {}
+    all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
+    if all_speeds:
+        lines.append("## Demand vs capacity (by speed class)")
+        lines.append("")
+        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Unmet |")
+        lines.append("|-------|---------------|---------------|----------------|----------------|-------|")
+        for speed in _sort_speeds(all_speeds):
+            ad = alloc_detail.get(speed, {})
+            lines.append(
+                f"| {speed} | {src_demand.get(speed, 0)} | {native_supply.get(speed, 0)} | "
+                f"{ad.get('matched_native', 0)} | {ad.get('matched_breakout', 0)} | "
+                f"{ad.get('unmet', 0)} |"
+            )
+        lines.append("")
+        lines.append(
+            "_**Matched upward** = a 1G demand satisfied by a 10G port (or 10G→25G/40G/100G, etc.)._"
+        )
+        lines.append("")
+
+    actionable = _actionable_findings(result["assessment"].get("findings", []) or [])
+    if actionable:
+        lines.append("## Migration path")
+        lines.append("")
+        lines.append("Findings that need to be addressed before or during cutover:")
+        lines.append("")
+        for f in sorted(
+            actionable,
+            key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.get("severity"), 4),
+        ):
+            lines.append(f"- {_sev_badge_md(f.get('severity', 'info'))} **{f.get('title', 'Untitled')}**")
+            if f.get("detail"):
+                lines.append(f"    - _Detail:_ {f['detail']}")
+            if f.get("recommendation"):
+                lines.append(f"    - _Action:_ {f['recommendation']}")
+        lines.append("")
+
+    checklist = _validation_checklist_items(result, analysis)
+    if checklist:
+        lines.append("## Pre-cutover validation checklist")
+        lines.append("")
+        for item in checklist:
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        f"_Generated {metadata.get('generated_at', 'UNKNOWN')} by "
+        f"netfit {metadata.get('netfit_version', 'UNKNOWN')}._"
+    )
+    return "\n".join(lines) + "\n"
 
 
 def build_best_fit_html(comparison, analysis):
     result = _find_best_fit_result(comparison)
     hostname = comparison.get("device_hostname", "UNKNOWN")
+    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
 
     body_parts = [f"<h1>Hardware Refresh — Best Fit for <code>{_esc(hostname)}</code></h1>"]
 
@@ -1126,6 +1369,7 @@ def build_best_fit_html(comparison, analysis):
         summary = result["assessment"].get("assessment_summary", {})
         rec = summary.get("overall_recommendation", "UNKNOWN")
         is_recommended = recommended == result["platform_name"]
+        alloc_ok = result.get("allocation_ok", True)
 
         body_parts.append('<div class="summary-box">')
         body_parts.append(
@@ -1137,6 +1381,11 @@ def build_best_fit_html(comparison, analysis):
         )
         body_parts.append(
             f"<p><strong>Fitness score:</strong> <code>{_esc(result['fitness_score'])}</code></p>"
+        )
+        alloc_badge = ('<span class="rec rec-fit">PASS</span>' if alloc_ok
+                       else '<span class="rec rec-conditional">FAIL — see Migration Path</span>')
+        body_parts.append(
+            f"<p><strong>Port-allocation status:</strong> {alloc_badge}</p>"
         )
         body_parts.append(
             f"<p><strong>Source profile:</strong> "
@@ -1153,7 +1402,102 @@ def build_best_fit_html(comparison, analysis):
             )
 
         body_parts.append(_device_context_html(analysis))
-        body_parts.append(_platform_detail_html(1, result, is_best_fit=True))
+
+        platform_notes = result["assessment"].get("platform_notes", []) or []
+        if platform_notes:
+            body_parts.append("<h2>About this platform</h2><ul>")
+            body_parts.extend(f"<li>{_esc(note)}</li>" for note in platform_notes)
+            body_parts.append("</ul>")
+
+        breakdown = result.get("score_breakdown", []) or []
+        if breakdown:
+            penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
+            bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
+            body_parts.append("<h2>Why this won</h2><ul>")
+            if bonuses:
+                body_parts.append(
+                    "<li><strong>Top bonuses:</strong> "
+                    + ", ".join(f"{_esc(b[0])} ({b[1]:+g})" for b in bonuses)
+                    + "</li>"
+                )
+            if penalties:
+                body_parts.append(
+                    "<li><strong>Top penalties:</strong> "
+                    + ", ".join(f"{_esc(p[0])} ({p[1]:+g})" for p in penalties)
+                    + "</li>"
+                )
+            body_parts.append("</ul>")
+            body_parts.append(
+                "<p style='font-size: 12px; color: #57606a;'>Full ranked comparison "
+                "and score breakdown across all candidates is in "
+                "<code>platform_comparison.html</code> and "
+                "<code>platform_comparison.json</code>.</p>"
+            )
+
+        src_demand = result.get("source_demand", {}) or {}
+        native_supply = result.get("native_supply", {}) or {}
+        alloc_detail = result.get("allocation_detail", {}) or {}
+        all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
+        if all_speeds:
+            body_parts.append("<h2>Demand vs capacity (by speed class)</h2><table>")
+            body_parts.append(
+                "<tr><th>Speed</th><th>Source demand</th><th>Native supply</th>"
+                "<th>Matched native</th><th>Matched upward</th><th>Unmet</th></tr>"
+            )
+            for speed in _sort_speeds(all_speeds):
+                ad = alloc_detail.get(speed, {})
+                body_parts.append(
+                    f"<tr><td>{_esc(speed)}</td>"
+                    f"<td>{_esc(src_demand.get(speed, 0))}</td>"
+                    f"<td>{_esc(native_supply.get(speed, 0))}</td>"
+                    f"<td>{_esc(ad.get('matched_native', 0))}</td>"
+                    f"<td>{_esc(ad.get('matched_breakout', 0))}</td>"
+                    f"<td>{_esc(ad.get('unmet', 0))}</td></tr>"
+                )
+            body_parts.append("</table>")
+            body_parts.append(
+                "<p style='font-size: 12px; color: #57606a;'>"
+                "<strong>Matched upward</strong> = a 1G demand satisfied by a 10G "
+                "port (or 10G→25G/40G/100G, etc.).</p>"
+            )
+
+        actionable = _actionable_findings(
+            result["assessment"].get("findings", []) or []
+        )
+        if actionable:
+            body_parts.append("<h2>Migration path</h2>")
+            body_parts.append("<p>Findings that need to be addressed before or during cutover:</p>")
+            for f in sorted(
+                actionable,
+                key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.get("severity"), 4),
+            ):
+                body_parts.append(
+                    '<div class="finding">'
+                    f'<div class="finding-title">{_esc(f.get("title", "Untitled"))}</div>'
+                    f'<div class="finding-meta">'
+                    f'{_sev_badge_html(f.get("severity", "info"))} '
+                    f'· Category: {_esc(f.get("category", "unknown"))}</div>'
+                )
+                if f.get("detail"):
+                    body_parts.append(f'<div><strong>Detail:</strong> {_esc(f["detail"])}</div>')
+                if f.get("recommendation"):
+                    body_parts.append(f'<div><strong>Action:</strong> {_esc(f["recommendation"])}</div>')
+                body_parts.append("</div>")
+
+        checklist = _validation_checklist_items(result, analysis)
+        if checklist:
+            body_parts.append("<h2>Pre-cutover validation checklist</h2><ul>")
+            for item in checklist:
+                body_parts.append(
+                    f'<li><input type="checkbox" disabled> {_esc(item)}</li>'
+                )
+            body_parts.append("</ul>")
+
+        body_parts.append(
+            f'<hr><p style="font-size: 12px; color: #57606a;">Generated '
+            f'{_esc(metadata.get("generated_at", "UNKNOWN"))} by netfit '
+            f'{_esc(metadata.get("netfit_version", "UNKNOWN"))}.</p>'
+        )
 
     return (
         "<!DOCTYPE html>\n"
