@@ -63,6 +63,10 @@ scale:
   max_static_routes: 4000
   max_vlans: 256
   ports:
+    # Cisco data sheet: 8× 1G SFP (Bay 0, 1G only) + 4× 1/10G SFP+ (Bay 1).
+    # The 8 SFP ports are 1G-only — encode them as 1G (no upward
+    # substitution available from there). The 4 SFP+ ports are encoded at
+    # their top speed.
     native:
       1G: 8
       10G: 4
@@ -93,5 +97,6 @@ fit_preferences:
 
 notes:
   - "Tuned planning profile for Cisco C8500L-8S4X."
+  - "8× 1GE SFP (Bay 0, 1G-only) + 4× 1/10GE SFP+ (Bay 1) + 1× RJ45 mgmt; up to 20 Gbps throughput."
   - "Best for smaller routed edge sites and lighter WAN service density."
   - "Less desirable for heavy BGP, high tunnel count, or dense uplink scale."

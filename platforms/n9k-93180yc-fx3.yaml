@@ -98,7 +98,7 @@ fit_preferences:
 
 notes:
   - "Tuned planning profile for Cisco Nexus 9300 93180YC-FX3 (NX-OS)."
-  - "48x SFP28 (1/10/25G) + 6x QSFP28 (40/100G); 1.8 Tbps switching."
+  - "48× SFP28 (1/10/25G) + 6× QSFP28 (40/100G); 3.6 Tbps switching, 1.2 Bpps forwarding."
   - "Best fit for L2/L3 ToR / leaf switching, VXLAN/EVPN fabrics, and aggregation."
   - "Not a fit for routed-WAN or VPN refreshes: no NAT, no IPsec, no GRE tunnels, no DHCP server."
   - "Note: netfit currently parses Cisco IOS / IOS-XE configs only; scoring against a real NX-OS config is gated on the planned NX-OS analyzer front-end."
