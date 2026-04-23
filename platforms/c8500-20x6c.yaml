@@ -66,18 +66,21 @@ scale:
   max_static_routes: 20000
   max_vlans: 512
   ports:
+    # Cisco data sheet: 20× 1/10GE SFP+ + 6× 40/100GE QSFP28. Encoded at the
+    # top speed each port can deliver; the allocator handles upward
+    # substitution (so 1G demand can land on a 10G port, 40G on a 100G).
     native:
-      1G: 20
-      10G: 6
+      1G: 0
+      10G: 20
       25G: 0
       40G: 0
-      100G: 0
+      100G: 6
     breakout:
       10G_to_10x1G: 0
       40G_to_4x10G: 0
-      100G_to_4x25G: 0
+      100G_to_4x25G: 6
     reserved_or_dedicated:
-      management: 0
+      management: 1
 
 constraints:
   intended_role: "wan_edge"
@@ -96,5 +99,6 @@ fit_preferences:
 
 notes:
   - "Tuned planning profile for Cisco C8500-20X6C."
+  - "20× 1/10GE SFP+ + 6× 40/100GE QSFP28; up to 500 Gbps aggregate throughput."
   - "Best fit for large routed WAN edge, high-scale services, and dense uplink environments."
   - "Prefer for high BGP/VRF/tunnel scale and mixed high-speed transport roles."

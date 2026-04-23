@@ -64,6 +64,8 @@ scale:
   max_static_routes: 8000
   max_vlans: 256
   ports:
+    # Cisco data sheet: 12× 1/10GE SFP+. Encoded at top speed; 1G demand
+    # lands on a 10G port via upward substitution.
     native:
       1G: 0
       10G: 12
@@ -75,7 +77,7 @@ scale:
       40G_to_4x10G: 0
       100G_to_4x25G: 0
     reserved_or_dedicated:
-      management: 0
+      management: 1
 
 constraints:
   intended_role: "wan_edge"
@@ -94,5 +96,6 @@ fit_preferences:
 
 notes:
   - "Tuned planning profile for Cisco C8500-12X."
+  - "12× 1/10GE SFP+; mid-scale Catalyst 8500 edge variant."
   - "Best for mid-scale WAN edge and routed service roles."
   - "Good balance when high-end C8500 variants are not required."

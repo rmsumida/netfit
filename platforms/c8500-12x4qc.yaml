@@ -66,18 +66,22 @@ scale:
   max_static_routes: 15000
   max_vlans: 512
   ports:
+    # Cisco data sheet: 12× 1/10GE SFP+ + 2× 40GE QSFP+ + 2× 40/100GE QSFP28.
+    # Each port encoded at its highest native speed; allocator handles upward
+    # substitution. The 2× 40G QSFP+ slots support 4×10GE breakout, giving
+    # up to 24×10GE total when not in SD-WAN mode.
     native:
       1G: 0
-      10G: 4
+      10G: 12
       25G: 0
-      40G: 0
-      100G: 12
+      40G: 2
+      100G: 2
     breakout:
       10G_to_10x1G: 0
-      40G_to_4x10G: 0
-      100G_to_4x25G: 8
+      40G_to_4x10G: 2
+      100G_to_4x25G: 2
     reserved_or_dedicated:
-      management: 0
+      management: 1
 
 constraints:
   intended_role: "wan_edge"
@@ -96,5 +100,6 @@ fit_preferences:
 
 notes:
   - "Tuned planning profile for Cisco C8500-12X4QC."
+  - "12× 1/10GE SFP+ + 2× 40GE QSFP+ + 2× 40/100GE QSFP28; up to 200 Gbps aggregate throughput."
   - "Strong fit for high-performance WAN edge with mixed uplink speeds."
   - "Often a good choice where interface speed mix matters more than absolute port density."
