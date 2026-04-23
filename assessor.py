@@ -148,9 +148,14 @@ def assess_refresh(analysis, target):
         _get(analysis, ["interfaces", "active_physical_by_speed_class"], {}) or {}
     )
     target_native_supply = scale.get("ports", {}).get("native", {}) or {}
+    target_breakout = scale.get("ports", {}).get("breakout", {}) or {}
     if active_physical_by_speed_class and target_native_supply:
+        # Pass the breakout dict so the finding fires only for cases the
+        # allocator genuinely can't satisfy via fanout. Without this, the
+        # assessor would diverge from the allocator and emit the finding
+        # for platforms where breakout absorbs the unmet demand.
         alloc = allocate_speed_capacity(
-            active_physical_by_speed_class, target_native_supply
+            active_physical_by_speed_class, target_native_supply, target_breakout
         )
         if not alloc["allocation_ok"]:
             unmet = alloc["unmet_demand"]
@@ -171,8 +176,9 @@ def assess_refresh(analysis, target):
                 severity,
                 "Port-speed demand exceeds target native supply",
                 f"Source device needs {sum(active_physical_by_speed_class.values())} "
-                f"physical ports across speed classes; after upward substitution, "
-                f"{unmet_str} cannot be satisfied by {target_name} native ports.",
+                f"physical ports across speed classes; after native + breakout fanout "
+                f"+ upward substitution, {unmet_str} cannot be satisfied by "
+                f"{target_name} ports.",
                 "Plan a port-mix conversion (breakout, line-card swap, or transceiver "
                 "rationalization) or pick a platform whose native supply matches the "
                 "demand profile."
