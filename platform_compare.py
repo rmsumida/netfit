@@ -585,6 +585,11 @@ def compare_platforms(analysis, target_profiles):
             "breakout_used": allocation.get("breakout_used", {}),
             "allocation_ok": allocation.get("allocation_ok", False),
             "interface_comparison": interface_comparison,
+            # Raw `scale` block from the target profile; the scale-comparison
+            # table in the unified report reads ceilings from here, and
+            # downstream consumers get direct access to the platform ceilings
+            # without having to re-parse the YAML.
+            "target_scale": scale,
         })
 
     results.sort(key=lambda r: (-r["fitness_score"], rank_assessment(r["assessment"])))
@@ -898,10 +903,121 @@ def _allocation_block_md(result):
     return lines
 
 
+def _scale_verdict_glyph(current, ceiling):
+    """Render a textual verdict for a single scale dimension. Mirrors the
+    assessor's headroom thresholds so the table and the findings agree."""
+    if current is None and ceiling is None:
+        return ("—", "—")
+    if ceiling in (None, 0):
+        return ("—", "No ceiling declared in profile")
+    if current is None:
+        return ("—", "Current workload unknown")
+    try:
+        ratio = current / ceiling
+    except ZeroDivisionError:
+        return ("—", "No ceiling declared in profile")
+    if ratio > 1.0:
+        return (f"{ratio:.0%}", "🔴 Exceeded")
+    if ratio >= 0.90:
+        return (f"{ratio:.0%}", "🟡 Close (≥90%)")
+    if ratio >= 0.75:
+        return (f"{ratio:.0%}", "⚠️ Tight (≥75%)")
+    return (f"{ratio:.0%}", "✅ Within")
+
+
+def _scale_comparison_rows(result, analysis):
+    """Build the per-dimension rows for the scale-comparison table. Returns
+    a list of tuples: (dimension, current_str, ceiling_str, headroom_str,
+    verdict_str). Rows where both current and ceiling are unknown get
+    filtered out; rows with ceiling missing stay in so the reader can see
+    which dimensions have no published ceiling in the target profile."""
+    scale = result.get("target_scale", {}) or {}
+    interfaces = analysis.get("interfaces", {}) or {}
+    routing = analysis.get("routing", {}) or {}
+    services = analysis.get("services", {}) or {}
+    crypto = analysis.get("crypto_vpn", {}) or {}
+    runtime = analysis.get("runtime", {}) or {}
+    runtime_nat = runtime.get("nat", {}) or {}
+    runtime_crypto = runtime.get("crypto", {}) or {}
+
+    peak_translations = runtime_nat.get("peak_translations")
+    active_translations = runtime_nat.get("active_translations")
+    observed_translations = (
+        peak_translations if peak_translations is not None else active_translations
+    )
+    nat_label_suffix = " (peak)" if peak_translations is not None else " (active)"
+
+    max_physical = (
+        scale.get("max_physical_interfaces") or scale.get("max_interfaces")
+    )
+
+    raw_rows = [
+        ("Active physical interfaces",
+         interfaces.get("active_physical_count"),
+         max_physical),
+        ("Active subinterfaces",
+         interfaces.get("active_subinterfaces"),
+         scale.get("max_subinterfaces")),
+        ("VRFs",
+         len(routing.get("vrfs", []) or []) if routing.get("vrfs") is not None else None,
+         scale.get("max_vrfs")),
+        ("BGP neighbors",
+         _get(routing, ["bgp", "neighbor_count"]),
+         scale.get("max_bgp_neighbors")),
+        ("Static routes",
+         routing.get("static_route_count"),
+         scale.get("max_static_routes")),
+        ("Tunnel interfaces (config)",
+         interfaces.get("active_tunnels"),
+         scale.get("max_tunnels")),
+        (f"NAT translations{nat_label_suffix}" if observed_translations is not None
+             else "NAT translations (runtime)",
+         observed_translations,
+         scale.get("max_nat_translations")),
+        ("IPsec SAs (runtime)",
+         runtime_crypto.get("active_sas"),
+         scale.get("max_ipsec_sas")),
+    ]
+
+    rows = []
+    for dim, current, ceiling in raw_rows:
+        if current is None and ceiling is None:
+            continue
+        current_str = str(current) if current is not None else "—"
+        ceiling_str = str(ceiling) if ceiling is not None else "not specified"
+        headroom, verdict = _scale_verdict_glyph(current, ceiling)
+        rows.append((dim, current_str, ceiling_str, headroom, verdict))
+    return rows
+
+
+def _scale_comparison_md(result, analysis):
+    rows = _scale_comparison_rows(result, analysis)
+    if not rows:
+        return []
+    lines = [
+        "### Scale Comparison",
+        "",
+        "Current source-device workload vs. target-platform ceilings. "
+        "Rows with an unpopulated ceiling are intentional — not every "
+        "platform YAML publishes every limit yet; see the platform data-sheet "
+        "audit follow-up for gaps.",
+        "",
+        "| Dimension | Current | Target ceiling | Headroom | Verdict |",
+        "|-----------|---------|----------------|----------|---------|",
+    ]
+    for dim, current, ceiling, headroom, verdict in rows:
+        lines.append(
+            f"| {dim} | {current} | {ceiling} | {headroom} | {verdict} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _best_fit_detail_md(result, analysis):
-    """Best-fit narrative: platform notes, allocation, migration path, and
-    pre-cutover checklist. Scoring lives in the methodology appendix — this
-    section is for the person deciding and planning the refresh."""
+    """Best-fit narrative: platform notes, scale comparison, allocation,
+    migration path, and pre-cutover checklist. Scoring lives in the
+    methodology appendix — this section is for the person deciding and
+    planning the refresh."""
     lines = [f"## Best-Fit Detail: {result['platform_name']}", ""]
 
     platform_notes = result["assessment"].get("platform_notes", []) or []
@@ -911,6 +1027,8 @@ def _best_fit_detail_md(result, analysis):
         for note in platform_notes:
             lines.append(f"- {note}")
         lines.append("")
+
+    lines.extend(_scale_comparison_md(result, analysis))
 
     lines.extend(_allocation_block_md(result))
     lines.append("")
@@ -1521,6 +1639,32 @@ def _allocation_block_html(result):
     return parts
 
 
+def _scale_comparison_html(result, analysis):
+    rows = _scale_comparison_rows(result, analysis)
+    if not rows:
+        return []
+    parts = [
+        "<h3>Scale Comparison</h3>",
+        "<p>Current source-device workload vs. target-platform ceilings. "
+        "Rows with an unpopulated ceiling are intentional — not every "
+        "platform YAML publishes every limit yet; see the platform "
+        "data-sheet audit follow-up for gaps.</p>",
+        "<table>",
+        "<tr><th>Dimension</th><th>Current</th><th>Target ceiling</th>"
+        "<th>Headroom</th><th>Verdict</th></tr>",
+    ]
+    for dim, current, ceiling, headroom, verdict in rows:
+        parts.append(
+            f"<tr><td>{_esc(dim)}</td>"
+            f"<td>{_esc(current)}</td>"
+            f"<td>{_esc(ceiling)}</td>"
+            f"<td>{_esc(headroom)}</td>"
+            f"<td>{_esc(verdict)}</td></tr>"
+        )
+    parts.append("</table>")
+    return parts
+
+
 def _best_fit_detail_html(result, analysis):
     parts = [f"<h2>Best-Fit Detail: {_esc(result['platform_name'])}</h2>"]
 
@@ -1529,6 +1673,8 @@ def _best_fit_detail_html(result, analysis):
         parts.append("<h3>About this platform</h3><ul>")
         parts.extend(f"<li>{_esc(note)}</li>" for note in platform_notes)
         parts.append("</ul>")
+
+    parts.extend(_scale_comparison_html(result, analysis))
 
     parts.extend(_allocation_block_html(result))
 
