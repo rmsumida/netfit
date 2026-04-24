@@ -133,4 +133,34 @@ The determinism implication — same combined-harvest input → byte-identical `
 
 ---
 
-*New decisions should be added with sequential numbering (DEC-007, etc.)*
+## DEC-007: One human-readable report per device; scoring methodology is a bottom appendix
+
+| Field | Value |
+|-------|-------|
+| Status | LOCKED |
+| Date | 2026-04-23 |
+| Session | 007 |
+
+**Decision:** Each device run produces exactly one human-readable report — `report.md` + `report.html` — with a locked section sequence:
+
+1. **Verdict** (best-fit platform, overall recommendation, port-allocation status, caveat if not actually recommended)
+2. **Source Device Context** (inventory, interfaces, routing scale, NAT scale, IPsec / VPN scale, features, analyzer-identified risks and migration considerations)
+3. **Ranked Candidates** (table: verdict label and finding counts — **no fitness column**)
+4. **Best-Fit Detail** (about-this-platform notes, scale comparison table, demand-vs-capacity by speed class, allocation outcome, migration path, pre-cutover validation checklist)
+5. **Other Candidates** (compact per-platform: verdict + headline findings only)
+6. **Scoring Methodology (Appendix)** — fitness score + grouped breakdown, clearly marked as audit / tie-breaker / calibration use only
+
+`platform_comparison.json` is retained as the machine-readable downstream artifact and is a different audience from the human-readable report; JSON and MD/HTML must not be conflated. No additional human-readable variants ("executive summary", "one-pager", etc.) should be introduced as separate files — they belong as sections or conditional blocks within the single unified report.
+
+**Alternatives Considered:**
+1. Keep the pre-session-007 split (`platform_comparison.{md,html}` for the multi-platform comparison + `best_fit_report.{md,html}` for the focused best-fit view) — Rejected: overlapping content, user friction of picking which file to open, and the best-fit narrative is a section of the broader story, not a separate document.
+2. Eliminate scoring entirely from the user-facing report — Rejected: the score + grouped breakdown still has real utility for differentiating close calls, validating calibration, and auditing why platform A outranked platform B. Removing it would force users to read `platform_comparison.json` to recover the signal.
+3. Put scoring at the top as the "summary" — Rejected: this was the pre-session-007 shape, and it caused confusion because end users have no frame of reference for what "fitness = 680" means relative to "fitness = 920". The verdict label (`LIKELY_FIT` / `CONDITIONAL_FIT` / `HIGH_RISK` / `NOT_RECOMMENDED`) is the user-facing signal; the score is a developer / audit signal.
+
+**Rationale:** Verdict labels are calibrated, documented, and consumable without context. Scoring numbers require the reader to know the model's internals to judge whether 680 means "close second" or "well below threshold". Leading with the score undermined trust in the verdict and hid the workload-level story. Source-device context now carries the scale dimensions (NAT, IPsec SAs, routing scale) that drive the verdict, so the reader can trace the conclusion without needing the score at all. The scoring appendix keeps the audit trail without putting it in the user's primary flow.
+
+**Conditions for revisiting:** Evidence that the appendix is consumed frequently enough that a user population is actively hunting for the score upstream — at which point consider a middle-ground like surfacing the grouped breakdown under a collapsible `<details>` element mid-report. Do not re-split the human-readable output into multiple files; that was explicitly the problem this decision solves.
+
+---
+
+*New decisions should be added with sequential numbering (DEC-008, etc.)*

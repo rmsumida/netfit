@@ -1,7 +1,7 @@
 # netfit — Project Context
 
 > **Purpose:** Single source of truth for every Claude session.
-> Last updated: 2026-04-22 | Session: 006
+> Last updated: 2026-04-23 | Session: 007
 
 ---
 
@@ -26,12 +26,13 @@
 | DEC-004 — Runtime parsers keyed by intent, not raw command string | LOCKED | 2026-04-19 | Platform/train variation (validated ASR1013/16.03.07) means one intent has multiple exact-command aliases |
 | DEC-005 — Dual-track fixture strategy (greenfield-reference + production-shape coexist) | LOCKED | 2026-04-20 | Parser robustness and architectural documentation are different requirements; one fixture family can't serve both |
 | DEC-006 — Sanitizer covers both config and runtime bodies; runs before parser dispatch in both paths | LOCKED | 2026-04-21 | Combined-harvest ingestion made sanitization a runtime concern too; instance-level TokenMapper counters give both bodies a single monotonic keyspace |
+| DEC-007 — One human-readable report per device (`report.{md,html}`); scoring methodology is a bottom appendix, never leads | LOCKED | 2026-04-23 | Two parallel reports created friction and overlapping content; fitness numbers confused readers with no frame of reference — verdict labels are the user-facing signal, score is audit/tie-breaker only |
 
 ## 3. Goals & Success Criteria
 
 - Ship a deterministic, offline pipeline that ranks replacement platforms for a given config (done — Cisco IOS/IOS-XE)
 - Preserve the vendor/OS boundary so new dialects (NX-OS, IOS-XR, Arista, Juniper) can be added without touching assessor / scoring / reporting
-- Keep the 289-test pytest suite green; every sanitizer regex change adds a regression test
+- Keep the 301-test pytest suite green; every sanitizer regex change adds a regression test
 - Same input + same rules + same platforms → byte-identical output, every time
 
 ## 4. Financial Position
