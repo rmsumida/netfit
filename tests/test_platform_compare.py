@@ -324,3 +324,204 @@ def test_max_physical_interfaces_falls_back_to_max_interfaces():
     scale = {"max_interfaces": 28}
     effective = scale.get("max_physical_interfaces") or scale.get("max_interfaces", 0)
     assert effective == 28
+
+
+# ---------------------------------------------------------------------------
+# NAT + IPsec SA ceiling findings (PR-B).
+# ---------------------------------------------------------------------------
+
+def _nat_ipsec_analysis(active_nat=None, peak_nat=None, active_sas=None):
+    """Minimal analysis skeleton that exercises the NAT + IPsec SA assessor
+    paths. `routing` stays empty; `services.nat_present` and
+    `crypto_vpn.ipsec_present` are flagged on so the assessor enters both
+    code paths."""
+    return {
+        "summary": {"hostname": "test", "routing_protocols_enabled": []},
+        "interfaces": {
+            "total": 0, "active_total": 0, "active_physical_count": 0,
+            "active_subinterfaces": 0, "active_tunnels": 0,
+            "active_physical_by_type": {}, "active_physical_by_speed_class": {},
+            "active_physical_by_role": {}, "active_management_interfaces": 0,
+            "active_wan_physical_count": 0, "active_lan_physical_count": 0,
+            "active_uplink_physical_count": 0, "active_port_channel_member_count": 0,
+            "active_port_channels": 0, "by_type": {},
+            "layer2_access_count": 0, "layer2_trunk_count": 0, "layer3_count": 0,
+        },
+        "switching": {"spanning_tree": {"present": False}},
+        "routing": {"vrfs": [], "static_route_count": 0, "protocols": {}, "bgp": {}},
+        "high_availability": {},
+        "security": {},
+        "services": {"nat_present": True, "nat_line_count": 10},
+        "policy": {},
+        "management_plane": {},
+        "crypto_vpn": {
+            "crypto_present": True, "ipsec_present": True,
+            "crypto_line_count": 10,
+        },
+        "runtime": {
+            "nat": {
+                "active_translations": active_nat,
+                "peak_translations": peak_nat,
+            },
+            "crypto": {"active_sas": active_sas},
+        },
+    }
+
+
+def _profile_with_ceilings(
+    max_nat_translations=None, max_ipsec_sas=None,
+):
+    """Synthetic target profile exercising only the assessor scale paths
+    relevant to this test group. Capabilities are fully permissive so the
+    critical-unsupported paths don't fire and mask the headroom logic."""
+    return {
+        "platform_name": "Test_Target",
+        "capabilities": {
+            "supported_interface_types": [],
+            "supports_nat": True, "supports_crypto": True,
+            "supports_ipsec": True, "supports_ikev2": True,
+            "supports_isakmp": True, "supports_tunnel_interfaces": True,
+            "supports_bgp": True, "supports_vrf": True, "supports_ospf": True,
+            "supports_hsrp": True, "supports_aaa": True,
+            "supports_subinterfaces": True,
+        },
+        "scale": {
+            "max_interfaces": 10000, "max_physical_interfaces": 10000,
+            "max_subinterfaces": 10000, "max_vrfs": 10000,
+            "max_bgp_neighbors": 10000, "max_static_routes": 100000,
+            "max_tunnels": 10000, "ports": {"native": {}, "breakout": {}},
+            "max_nat_translations": max_nat_translations,
+            "max_ipsec_sas": max_ipsec_sas,
+        },
+        "fit_preferences": {},
+        "constraints": {},
+        "notes": [],
+    }
+
+
+def test_nat_translation_ceiling_exceeded_flags_finding():
+    from assessor import assess_refresh
+    analysis = _nat_ipsec_analysis(peak_nat=150_000)
+    profile = _profile_with_ceilings(max_nat_translations=100_000)
+    result = assess_refresh(analysis, profile)
+    titles = [f["title"] for f in result["findings"]]
+    assert "NAT translation scale exceeds target profile" in titles
+
+
+def test_nat_translation_headroom_approaching_flags_advisory():
+    """Peak translations at ~80% of ceiling should produce an advisory
+    headroom finding (low severity), not a hard exceeds finding."""
+    from assessor import assess_refresh
+    analysis = _nat_ipsec_analysis(peak_nat=80_000)
+    profile = _profile_with_ceilings(max_nat_translations=100_000)
+    result = assess_refresh(analysis, profile)
+    nat_findings = [
+        f for f in result["findings"] if "NAT translation" in f["title"]
+    ]
+    assert any("approaching" in f["title"].lower() for f in nat_findings)
+    assert not any("exceeds" in f["title"].lower() for f in nat_findings)
+
+
+def test_nat_uses_peak_translations_when_present_else_active():
+    """When runtime harvest carries peak_translations, the assessor should
+    compare against peak (the high-water-mark demand), not the instantaneous
+    active count."""
+    from assessor import assess_refresh
+    # Active below ceiling, peak above — finding should fire off peak.
+    analysis = _nat_ipsec_analysis(active_nat=50_000, peak_nat=150_000)
+    profile = _profile_with_ceilings(max_nat_translations=100_000)
+    result = assess_refresh(analysis, profile)
+    titles = [f["title"] for f in result["findings"]]
+    assert "NAT translation scale exceeds target profile" in titles
+
+
+def test_nat_finding_skipped_without_ceiling():
+    """If the target profile has no max_nat_translations, the assessor must
+    not emit any NAT-scale finding — no false positives from missing data."""
+    from assessor import assess_refresh
+    analysis = _nat_ipsec_analysis(peak_nat=500_000)
+    profile = _profile_with_ceilings(max_nat_translations=None)
+    result = assess_refresh(analysis, profile)
+    nat_scale_findings = [
+        f for f in result["findings"]
+        if "NAT translation" in f["title"]
+    ]
+    assert nat_scale_findings == []
+
+
+def test_ipsec_sa_ceiling_exceeded_flags_finding():
+    from assessor import assess_refresh
+    analysis = _nat_ipsec_analysis(active_sas=12_000)
+    profile = _profile_with_ceilings(max_ipsec_sas=8_000)
+    result = assess_refresh(analysis, profile)
+    titles = [f["title"] for f in result["findings"]]
+    assert "IPsec SA scale exceeds target profile" in titles
+
+
+def test_ipsec_sa_headroom_approaching_flags_advisory():
+    from assessor import assess_refresh
+    analysis = _nat_ipsec_analysis(active_sas=7_000)
+    profile = _profile_with_ceilings(max_ipsec_sas=8_000)
+    result = assess_refresh(analysis, profile)
+    crypto_findings = [
+        f for f in result["findings"] if "IPsec SA" in f["title"]
+    ]
+    assert any("approaching" in f["title"].lower() for f in crypto_findings)
+    assert not any("exceeds" in f["title"].lower() for f in crypto_findings)
+
+
+def test_ipsec_sa_finding_skipped_without_ceiling_or_runtime():
+    from assessor import assess_refresh
+    # Ceiling declared, runtime absent -> no finding.
+    analysis = _nat_ipsec_analysis(active_sas=None)
+    profile = _profile_with_ceilings(max_ipsec_sas=8_000)
+    result = assess_refresh(analysis, profile)
+    assert not any("IPsec SA" in f["title"] for f in result["findings"])
+    # Runtime present, ceiling absent -> no finding.
+    analysis = _nat_ipsec_analysis(active_sas=99_999)
+    profile = _profile_with_ceilings(max_ipsec_sas=None)
+    result = assess_refresh(analysis, profile)
+    assert not any("IPsec SA" in f["title"] for f in result["findings"])
+
+
+# ---------------------------------------------------------------------------
+# Scale-comparison table renderer (PR-B).
+# ---------------------------------------------------------------------------
+
+def test_scale_comparison_rows_include_populated_and_skip_fully_unknown():
+    """Rows where both current and ceiling are None should be dropped; rows
+    where ceiling is missing but current is known should stay in so the
+    reader can see which dimensions have no published ceiling yet."""
+    from platform_compare import _scale_comparison_rows
+    analysis = _nat_ipsec_analysis(peak_nat=100, active_sas=None)
+    result = {
+        "target_scale": {
+            "max_physical_interfaces": 26, "max_subinterfaces": 2000,
+            "max_vrfs": 128, "max_bgp_neighbors": 1000,
+            "max_static_routes": 20000, "max_tunnels": 2000,
+            # No max_nat_translations or max_ipsec_sas — audit gap.
+        },
+    }
+    rows = _scale_comparison_rows(result, analysis)
+    dims = [r[0] for r in rows]
+    # NAT row must still appear (current known, ceiling absent).
+    assert any("NAT translations" in d for d in dims)
+    # IPsec SA row must be dropped (both current and ceiling absent).
+    assert not any("IPsec SAs" in d for d in dims)
+    # Verdict for the NAT row should flag the missing ceiling explicitly.
+    nat_row = next(r for r in rows if "NAT translations" in r[0])
+    assert "No ceiling declared" in nat_row[4]
+
+
+def test_scale_comparison_rows_classify_headroom_bands():
+    """Verdict glyph should match the assessor's thresholds (≥90% close,
+    ≥75% tight, >100% exceeded) so the two signals agree."""
+    from platform_compare import _scale_verdict_glyph
+    assert "Exceeded" in _scale_verdict_glyph(150, 100)[1]
+    assert "Close" in _scale_verdict_glyph(95, 100)[1]
+    assert "Tight" in _scale_verdict_glyph(80, 100)[1]
+    assert "Within" in _scale_verdict_glyph(50, 100)[1]
+    # Missing ceiling -> "No ceiling declared"
+    assert "No ceiling declared" in _scale_verdict_glyph(100, None)[1]
+    # Missing current -> "Current workload unknown"
+    assert "unknown" in _scale_verdict_glyph(None, 100)[1].lower()

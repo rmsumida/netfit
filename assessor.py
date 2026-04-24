@@ -620,6 +620,47 @@ def assess_refresh(analysis, target):
             "Select a NAT-capable platform or redesign address translation services."
         ))
 
+    # NAT scale: compare runtime translation counts (when a NetBrain harvest
+    # provides them) against the target profile's `max_nat_translations`
+    # ceiling. We prefer the peak count if available because it reflects the
+    # high-water-mark demand the platform must absorb under load; fall back
+    # to the active count otherwise. Missing ceiling -> skip.
+    max_nat_translations = scale.get("max_nat_translations")
+    runtime_nat = _get(analysis, ["runtime", "nat"], {}) or {}
+    peak_translations = runtime_nat.get("peak_translations")
+    active_translations = runtime_nat.get("active_translations")
+    observed_translations = (
+        peak_translations if peak_translations is not None else active_translations
+    )
+    if (services.get("nat_present") and max_nat_translations is not None
+            and observed_translations is not None):
+        if observed_translations > max_nat_translations:
+            over_ratio = (
+                observed_translations / max_nat_translations
+                if max_nat_translations else 0
+            )
+            severity = "high" if over_ratio >= 1.25 else "medium"
+            findings.append(make_finding(
+                "services",
+                severity,
+                "NAT translation scale exceeds target profile",
+                f"Runtime NAT shows {observed_translations} "
+                f"{'peak' if peak_translations is not None else 'active'} "
+                f"translations, above target ceiling of {max_nat_translations}.",
+                "Validate NAT pool sizing, consider larger platform tier, "
+                "or offload translation to a dedicated NAT service."
+            ))
+        else:
+            _add_headroom_finding(
+                findings,
+                "services",
+                "NAT translation usage approaching target platform scale",
+                observed_translations,
+                max_nat_translations,
+                "Ensure translation headroom for traffic growth and migration "
+                "spikes; review pool sizing and short-lived flow patterns."
+            )
+
     if services.get("dhcp_server_present") and not capabilities.get("supports_dhcp_server", False):
         findings.append(make_finding(
             "services",
@@ -719,6 +760,39 @@ def assess_refresh(analysis, target):
             "Current config includes tunnel interfaces, but target profile does not indicate tunnel support.",
             "Validate GRE/DMVPN/tunnel use cases and choose an appropriate platform."
         ))
+
+    # IPsec SA scale: compare runtime SA count (when a NetBrain harvest
+    # provides it) against the target profile's `max_ipsec_sas` ceiling.
+    # Units are SAs, not tunnels — each IPsec tunnel typically has 2 SAs
+    # (inbound + outbound), so data-sheet "IPsec tunnel" counts must be
+    # doubled when populating the YAML. Missing ceiling -> skip.
+    max_ipsec_sas = scale.get("max_ipsec_sas")
+    runtime_crypto = _get(analysis, ["runtime", "crypto"], {}) or {}
+    active_sas = runtime_crypto.get("active_sas")
+    if (crypto.get("ipsec_present") and max_ipsec_sas is not None
+            and active_sas is not None):
+        if active_sas > max_ipsec_sas:
+            over_ratio = active_sas / max_ipsec_sas if max_ipsec_sas else 0
+            severity = "high" if over_ratio >= 1.25 else "medium"
+            findings.append(make_finding(
+                "crypto_vpn",
+                severity,
+                "IPsec SA scale exceeds target profile",
+                f"Runtime shows {active_sas} active IPsec SAs, above target "
+                f"ceiling of {max_ipsec_sas}.",
+                "Validate tunnel count assumptions, consider a larger platform "
+                "tier, or redistribute crypto load across multiple devices."
+            ))
+        else:
+            _add_headroom_finding(
+                findings,
+                "crypto_vpn",
+                "IPsec SA usage approaching target platform scale",
+                active_sas,
+                max_ipsec_sas,
+                "Ensure SA headroom for rekey storms, tunnel flap, and "
+                "migration cut-over bursts."
+            )
 
     # --------------------------------------------------
     # Constraint-based / role-fit advisories
