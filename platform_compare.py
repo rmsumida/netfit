@@ -615,7 +615,14 @@ def compare_platforms(analysis, target_profiles):
 
 def _device_context_lines_md(analysis):
     """Render the one-shot source-device context that's shared across all
-    platform candidates."""
+    platform candidates.
+
+    Routing / NAT / IPsec scale numbers land here so the reader sees the
+    current workload on the source device before any target comparison. When
+    a NetBrain runtime harvest is merged (`analysis['runtime']`), live
+    translation counts and active-SA counts are surfaced alongside the
+    config-side presence flags.
+    """
     summary = analysis.get("summary", {})
     interfaces = analysis.get("interfaces", {})
     routing = analysis.get("routing", {})
@@ -624,6 +631,9 @@ def _device_context_lines_md(analysis):
     policy = analysis.get("policy", {})
     crypto = analysis.get("crypto_vpn", {})
     ha = analysis.get("high_availability", {})
+    runtime = analysis.get("runtime", {}) or {}
+    runtime_nat = runtime.get("nat", {}) or {}
+    runtime_crypto = runtime.get("crypto", {}) or {}
 
     lines = ["## Source Device Context", ""]
     lines.append(f"- **Hostname:** {summary.get('hostname', 'UNKNOWN')}")
@@ -673,10 +683,97 @@ def _device_context_lines_md(analysis):
     lines.append(f"- **Active port-channels:** {interfaces.get('active_port_channels', 0)}")
 
     protocols = summary.get("routing_protocols_enabled", []) or []
+    lines.append("")
+    lines.append("### Routing scale")
     lines.append(f"- **Routing protocols:** {', '.join(protocols) if protocols else 'None'}")
     lines.append(f"- **BGP neighbors:** {_get(routing, ['bgp', 'neighbor_count'], 0)}")
     lines.append(f"- **VRFs:** {len(routing.get('vrfs', []) or [])}")
     lines.append(f"- **Static routes:** {routing.get('static_route_count', 0)}")
+    ospf_procs = _get(routing, ["ospf", "processes"], []) or []
+    eigrp_procs = _get(routing, ["eigrp", "processes"], []) or []
+    if ospf_procs or eigrp_procs:
+        lines.append(f"- **OSPF processes:** {len(ospf_procs)}")
+        lines.append(f"- **EIGRP processes:** {len(eigrp_procs)}")
+        lines.append(
+            "    - _OSPF / EIGRP neighbor counts depend on runtime harvest "
+            "(see GH #22). Without `show ip ospf neighbor` / `show ip eigrp "
+            "neighbors` output, only process counts are visible here._"
+        )
+    runtime_routes = runtime.get("route_table", {}) or {}
+    if runtime_routes:
+        total_routes = runtime_routes.get("ipv4_total")
+        if total_routes is not None:
+            lines.append(f"- **Live IPv4 routes (runtime):** {total_routes}")
+        by_proto = runtime_routes.get("ipv4_by_protocol", {}) or {}
+        if by_proto:
+            lines.append(
+                "    - _By protocol:_ "
+                + ", ".join(f"{k}={v}" for k, v in sorted(by_proto.items()))
+            )
+
+    lines.append("")
+    lines.append("### NAT scale")
+    if services.get("nat_present"):
+        lines.append(f"- **NAT configured:** Yes ({services.get('nat_line_count', 0)} config lines)")
+    else:
+        lines.append("- **NAT configured:** No")
+    if runtime_nat:
+        active = runtime_nat.get("active_translations")
+        peak = runtime_nat.get("peak_translations")
+        if active is not None or peak is not None:
+            active_s = str(active) if active is not None else "unknown"
+            peak_s = str(peak) if peak is not None else "unknown"
+            lines.append(
+                f"- **Translations (runtime):** active={active_s}, peak={peak_s}"
+            )
+        hits = runtime_nat.get("hits")
+        misses = runtime_nat.get("misses")
+        if hits is not None or misses is not None:
+            hits_s = str(hits) if hits is not None else "unknown"
+            misses_s = str(misses) if misses is not None else "unknown"
+            lines.append(f"- **NAT hits/misses (runtime):** {hits_s} / {misses_s}")
+    elif services.get("nat_present"):
+        lines.append(
+            "    - _Runtime translation counts not available. Provide a "
+            "`show ip nat statistics` harvest to surface active / peak "
+            "translation counts for ceiling comparison._"
+        )
+
+    lines.append("")
+    lines.append("### IPsec / VPN scale")
+    if crypto.get("crypto_present"):
+        parts_c = []
+        if crypto.get("isakmp_present"):
+            parts_c.append("ISAKMP")
+        if crypto.get("ikev2_present"):
+            parts_c.append("IKEv2")
+        if crypto.get("ipsec_present"):
+            parts_c.append("IPsec")
+        if crypto.get("tunnel_interfaces_present"):
+            parts_c.append("tunnel-if")
+        mode = "/".join(parts_c) if parts_c else "crypto (unspecified)"
+        lines.append(
+            f"- **Crypto configured:** Yes — {mode} "
+            f"({crypto.get('crypto_line_count', 0)} config lines)"
+        )
+    else:
+        lines.append("- **Crypto configured:** No")
+    lines.append(f"- **Tunnel interfaces (config):** {interfaces.get('active_tunnels', 0)}")
+    if runtime_crypto:
+        active_sas = runtime_crypto.get("active_sas")
+        total_sas = runtime_crypto.get("total_sas")
+        if active_sas is not None or total_sas is not None:
+            active_s = str(active_sas) if active_sas is not None else "unknown"
+            total_s = str(total_sas) if total_sas is not None else "unknown"
+            lines.append(
+                f"- **IPsec SAs (runtime):** active={active_s}, total={total_s}"
+            )
+    elif crypto.get("crypto_present"):
+        lines.append(
+            "    - _Runtime IPsec SA counts not available. Provide a "
+            "`show crypto ipsec sa count` harvest to surface active / total "
+            "SA counts for ceiling comparison._"
+        )
     lines.append("")
 
     feature_flags = [
@@ -708,83 +805,81 @@ def _device_context_lines_md(analysis):
     return lines
 
 
-def _platform_detail_lines_md(idx, result):
-    p_name = result.get("platform_name", "UNKNOWN")
-    src_file = result.get("source_file", "")
-    fitness = result.get("fitness_score", 0)
-    assessment = result.get("assessment", {})
-    summary = assessment.get("assessment_summary", {})
-    rec = summary.get("overall_recommendation", "UNKNOWN")
-    risk = summary.get("total_risk_score", 0)
+def _ranked_table_md(results):
+    """Ranked candidates table. Verdict and finding counts — no fitness
+    column; scoring is relegated to the bottom appendix."""
+    lines = [
+        "| Rank | Platform | Verdict | Risk | Critical | High | Medium | Low |",
+        "|------|----------|---------|------|----------|------|--------|-----|",
+    ]
+    for idx, r in enumerate(results, start=1):
+        summary = r["assessment"].get("assessment_summary", {})
+        counts = summary.get("finding_counts", {})
+        lines.append(
+            f"| {idx} | {r['platform_name']} | "
+            f"{summary.get('overall_recommendation', 'UNKNOWN')} | "
+            f"{summary.get('total_risk_score', 0)} | "
+            f"{counts.get('critical', 0)} | {counts.get('high', 0)} | "
+            f"{counts.get('medium', 0)} | {counts.get('low', 0)} |"
+        )
+    return lines
 
-    lines = [f"## {idx}. {p_name}", ""]
-    lines.append(f"- **Source file:** `{src_file}`")
-    lines.append(f"- **Fitness score:** {fitness}")
-    lines.append(f"- **Recommendation:** {rec}")
-    lines.append(f"- **Total risk score:** {risk}")
 
-    breakdown = result.get("score_breakdown", []) or []
-    if breakdown:
-        penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
-        bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
-        lines.append("")
-        lines.append("### Why this platform ranked here")
-        if penalties:
-            lines.append("- **Top penalties:** "
-                         + ", ".join(f"{p[0]} ({p[1]:+g})" for p in penalties))
-        if bonuses:
-            lines.append("- **Top bonuses:** "
-                         + ", ".join(f"{b[0]} ({b[1]:+g})" for b in bonuses))
-
-        groups = _group_breakdown(breakdown)
-        if groups:
-            lines.append("")
-            lines.append("### Score drivers (grouped)")
-            lines.append("| Driver | Net impact | Largest contributors |")
-            lines.append("|--------|-----------:|----------------------|")
-            for g in groups:
-                examples = "; ".join(f"{name} ({val:+g})" for name, val in g["examples"])
-                lines.append(f"| {g['label']} | {g['impact']:+g} | {examples} |")
-            lines.append("")
-            lines.append("_Full per-row breakdown is available in `platform_comparison.json` "
-                         "under each result's `score_breakdown` field._")
-
+def _allocation_block_md(result):
+    """Demand-vs-capacity table + allocation outcome bullets. Reused for
+    best-fit detail. Returns a list of lines (possibly empty)."""
     src_demand = result.get("source_demand", {}) or {}
     native_supply = result.get("native_supply", {}) or {}
     alloc_detail = result.get("allocation_detail", {}) or {}
     all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
+
+    lines = []
     if all_speeds:
-        lines.append("")
         lines.append("### Demand vs capacity (by speed class)")
-        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Matched via breakout | Unmet |")
-        lines.append("|-------|---------------|---------------|----------------|----------------|----------------------|-------|")
+        lines.append("")
+        lines.append(
+            "| Speed | Source demand | Native supply | Matched native | "
+            "Matched upward | Matched via breakout | Unmet |"
+        )
+        lines.append(
+            "|-------|---------------|---------------|----------------|"
+            "----------------|----------------------|-------|"
+        )
         for speed in _sort_speeds(all_speeds):
             ad = alloc_detail.get(speed, {})
             lines.append(
-                f"| {speed} | {src_demand.get(speed, 0)} | {native_supply.get(speed, 0)} | "
-                f"{ad.get('matched_native', 0)} | {ad.get('matched_native_upward', 0)} | "
-                f"{ad.get('matched_breakout_fanout', 0)} | {ad.get('unmet', 0)} |"
+                f"| {speed} | {src_demand.get(speed, 0)} | "
+                f"{native_supply.get(speed, 0)} | "
+                f"{ad.get('matched_native', 0)} | "
+                f"{ad.get('matched_native_upward', 0)} | "
+                f"{ad.get('matched_breakout_fanout', 0)} | "
+                f"{ad.get('unmet', 0)} |"
             )
         lines.append("")
         lines.append(
-            "_**Matched native** = demand absorbed by ports of the same speed class. "
-            "**Matched upward** = demand absorbed by a higher-speed native port at 1:1 "
-            "(e.g. a 1G demand satisfied by a 10G port). "
-            "**Matched via breakout** = demand absorbed by fanning out a higher-speed "
-            "port into N child ports of the dest speed (e.g. one 40G port → 4× 10G "
-            "via a `40G_to_4x10G` slot). **Unmet** = remaining demand with no native, "
+            "_**Matched native** = demand absorbed by same-speed-class ports. "
+            "**Matched upward** = a higher-speed native port absorbs lower-speed "
+            "demand at 1:1 (e.g. a 10G port serves a 1G demand). "
+            "**Matched via breakout** = a higher-speed port is fanned out into N "
+            "child ports of the dest speed (e.g. one 40G port → 4× 10G via a "
+            "`40G_to_4x10G` slot). **Unmet** = remaining demand with no native, "
             "upward, or breakout capacity._"
         )
+        lines.append("")
 
-    lines.append("")
     lines.append("### Allocation outcome")
+    lines.append("")
     lines.append(f"- **Status:** {'PASS' if result.get('allocation_ok') else 'FAIL'}")
     unmet = result.get("unmet_demand", {}) or {}
-    lines.append("- **Unmet demand:** "
-                 + (", ".join(f"{k}={v}" for k, v in unmet.items()) if unmet else "None"))
+    lines.append(
+        "- **Unmet demand:** "
+        + (", ".join(f"{k}={v}" for k, v in unmet.items()) if unmet else "None")
+    )
     breakout = result.get("breakout", {}) or {}
-    lines.append("- **Breakout available:** "
-                 + (", ".join(f"{k}={v}" for k, v in breakout.items()) if breakout else "None"))
+    lines.append(
+        "- **Breakout available:** "
+        + (", ".join(f"{k}={v}" for k, v in breakout.items()) if breakout else "None")
+    )
     breakout_used = result.get("breakout_used", {}) or {}
     if breakout_used:
         consumed_summaries = []
@@ -800,100 +895,253 @@ def _platform_detail_lines_md(idx, result):
         lines.append("- **Breakout consumed:** " + ", ".join(consumed_summaries))
     else:
         lines.append("- **Breakout consumed:** None")
-
-    platform_notes = assessment.get("platform_notes", []) or []
-    if platform_notes:
-        lines.append("")
-        lines.append("### About this platform")
-        for note in platform_notes:
-            lines.append(f"- {note}")
-
-    findings = assessment.get("findings", []) or []
-    if findings:
-        lines.append("")
-        lines.append("### Assessor findings")
-        for f in findings:
-            lines.append(f"- {_sev_badge_md(f.get('severity', 'info'))} "
-                         f"**{f.get('title', 'Untitled')}**")
-            if f.get("detail"):
-                lines.append(f"    - _Detail:_ {f['detail']}")
-            if f.get("recommendation"):
-                lines.append(f"    - _Recommendation:_ {f['recommendation']}")
-    lines.append("")
     return lines
 
 
-def build_comparison_markdown(comparison, analysis):
-    """Produce the full multi-platform comparison as Markdown.
+def _best_fit_detail_md(result, analysis):
+    """Best-fit narrative: platform notes, allocation, migration path, and
+    pre-cutover checklist. Scoring lives in the methodology appendix — this
+    section is for the person deciding and planning the refresh."""
+    lines = [f"## Best-Fit Detail: {result['platform_name']}", ""]
+
+    platform_notes = result["assessment"].get("platform_notes", []) or []
+    if platform_notes:
+        lines.append("### About this platform")
+        lines.append("")
+        for note in platform_notes:
+            lines.append(f"- {note}")
+        lines.append("")
+
+    lines.extend(_allocation_block_md(result))
+    lines.append("")
+
+    actionable = _actionable_findings(
+        result["assessment"].get("findings", []) or []
+    )
+    if actionable:
+        lines.append("### Migration path")
+        lines.append("")
+        lines.append("Findings that need to be addressed before or during cutover:")
+        lines.append("")
+        for f in sorted(
+            actionable,
+            key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                .get(x.get("severity"), 4),
+        ):
+            lines.append(
+                f"- {_sev_badge_md(f.get('severity', 'info'))} "
+                f"**{f.get('title', 'Untitled')}**"
+            )
+            if f.get("detail"):
+                lines.append(f"    - _Detail:_ {f['detail']}")
+            if f.get("recommendation"):
+                lines.append(f"    - _Action:_ {f['recommendation']}")
+        lines.append("")
+
+    checklist = _validation_checklist_items(result, analysis)
+    if checklist:
+        lines.append("### Pre-cutover validation checklist")
+        lines.append("")
+        for item in checklist:
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+
+    return lines
+
+
+def _other_candidate_md(idx, result):
+    """Compact entry for non-best-fit candidates. Verdict + headline findings
+    only; detailed breakdown is in the scoring methodology appendix."""
+    assessment = result.get("assessment", {})
+    summary = assessment.get("assessment_summary", {})
+    rec = summary.get("overall_recommendation", "UNKNOWN")
+
+    lines = [f"### {idx}. {result['platform_name']} — {rec}", ""]
+
+    findings = assessment.get("findings", []) or []
+    high_sev = [f for f in findings if f.get("severity") in ("critical", "high")]
+    med_sev = [f for f in findings if f.get("severity") == "medium"]
+
+    if high_sev:
+        lines.append("**Blocking findings:**")
+        lines.append("")
+        for f in high_sev:
+            lines.append(
+                f"- {_sev_badge_md(f.get('severity', 'info'))} "
+                f"{f.get('title', 'Untitled')}"
+            )
+        lines.append("")
+    if med_sev:
+        lines.append("**Material findings:**")
+        lines.append("")
+        for f in med_sev:
+            lines.append(
+                f"- {_sev_badge_md(f.get('severity', 'info'))} "
+                f"{f.get('title', 'Untitled')}"
+            )
+        lines.append("")
+    if not (high_sev or med_sev):
+        lines.append("_No blocking or material findings._")
+        lines.append("")
+
+    unmet = result.get("unmet_demand", {}) or {}
+    if unmet:
+        lines.append(
+            "**Unmet port demand:** "
+            + ", ".join(f"{v}× {k}" for k, v in unmet.items())
+        )
+        lines.append("")
+
+    return lines
+
+
+def _scoring_appendix_md(results):
+    """Scoring methodology appendix — per-platform fitness + grouped
+    breakdown. Pushed to the bottom so the verdict-first narrative leads;
+    developers / auditors still get the full signal."""
+    lines = [
+        "## Scoring Methodology (Appendix)",
+        "",
+        "Fitness starts at 1000 and is adjusted by overall recommendation, "
+        "severity-weighted finding counts, total risk score, interface capacity "
+        "/ speed allocation checks, scale-headroom utilization, and role-alignment "
+        "preferences. The **Recommended platform** is the highest-ranked candidate "
+        "whose verdict is `LIKELY_FIT` or `CONDITIONAL_FIT`.",
+        "",
+        "**Users should read the verdict and findings above — this appendix exists "
+        "for audit, tie-breaker, and calibration purposes only.**",
+        "",
+        "| Rank | Platform | Fitness |",
+        "|------|----------|---------|",
+    ]
+    for idx, r in enumerate(results, start=1):
+        lines.append(f"| {idx} | {r['platform_name']} | {r['fitness_score']} |")
+    lines.append("")
+
+    for idx, result in enumerate(results, start=1):
+        breakdown = result.get("score_breakdown", []) or []
+        if not breakdown:
+            continue
+        lines.append(f"### {idx}. {result['platform_name']}")
+        lines.append("")
+        penalties = sorted(
+            (s for s in breakdown if s[1] < 0), key=lambda x: x[1]
+        )[:3]
+        bonuses = sorted(
+            (s for s in breakdown if s[1] > 0), key=lambda x: -x[1]
+        )[:3]
+        if penalties:
+            lines.append(
+                "- **Top penalties:** "
+                + ", ".join(f"{p[0]} ({p[1]:+g})" for p in penalties)
+            )
+        if bonuses:
+            lines.append(
+                "- **Top bonuses:** "
+                + ", ".join(f"{b[0]} ({b[1]:+g})" for b in bonuses)
+            )
+        groups = _group_breakdown(breakdown)
+        if groups:
+            lines.append("")
+            lines.append("| Driver | Net impact | Largest contributors |")
+            lines.append("|--------|-----------:|----------------------|")
+            for g in groups:
+                examples = "; ".join(
+                    f"{name} ({val:+g})" for name, val in g["examples"]
+                )
+                lines.append(
+                    f"| {g['label']} | {g['impact']:+g} | {examples} |"
+                )
+        lines.append("")
+
+    lines.append(
+        "_Full per-row breakdown for every platform is available in "
+        "`platform_comparison.json` under each result's `score_breakdown` field._"
+    )
+    return lines
+
+
+def build_report_markdown(comparison, analysis):
+    """Produce the unified hardware-refresh report as Markdown.
 
     Layout:
-      1. Executive summary (best-fit, recommendation disposition)
-      2. Source device context (shared across all candidates)
-      3. Ranked comparison table
-      4. Per-platform detailed sections
+      1. Verdict (best-fit, recommendation, allocation status)
+      2. Source device context (inventory, routing / NAT / IPsec scale)
+      3. Ranked candidates (verdict + finding counts, no fitness column)
+      4. Best-fit detail (platform notes, allocation, migration path, checklist)
+      5. Other candidates (verdict + headline findings, compact)
+      6. Scoring methodology appendix (fitness + grouped breakdown, audit-only)
     """
     hostname = comparison.get("device_hostname", "UNKNOWN")
-    top_ranked = comparison.get("top_ranked_platform")
-    recommended = comparison.get("recommended_platform")
     results = comparison.get("results", [])
     metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
+    best_fit_name = comparison.get("best_fit_platform")
+    recommended = comparison.get("recommended_platform")
+    best_fit_result = _find_best_fit_result(comparison)
 
-    lines = ["# Multi-Platform Refresh Comparison", ""]
+    lines = [f"# Hardware Refresh Report — `{hostname}`", ""]
     lines.append(
         f"_Generated {metadata.get('generated_at', 'UNKNOWN')} by netfit "
         f"{metadata.get('netfit_version', 'UNKNOWN')}._"
     )
     lines.append("")
-    lines.append("## Executive Summary")
-    lines.append("")
-    lines.append(f"- **Device hostname:** {hostname}")
-    lines.append(f"- **Platforms compared:** {comparison.get('platform_count', 0)}")
-    lines.append(f"- **Top-ranked platform:** {top_ranked or 'None'}")
-    if recommended:
-        lines.append(f"- **Recommended platform:** **{recommended}**")
-    else:
-        lines.append("- **Recommended platform:** _None — no candidate earned LIKELY_FIT or CONDITIONAL_FIT_")
-        lines.append("")
-        lines.append("> **WARNING:** No candidate platform is recommended. "
-                     "Either expand the platform set or revisit the assessor calibration.")
-    lines.append("")
 
-    lines.append("### Ranking methodology")
+    lines.append("## Verdict")
     lines.append("")
-    lines.append("Fitness starts at 1000 and is adjusted by overall recommendation, "
-                 "severity-weighted finding counts, total risk score, interface "
-                 "capacity / speed allocation checks, scale-headroom utilization, "
-                 "and role-alignment preferences. The **Recommended platform** is "
-                 "the highest-ranked candidate that is not `HIGH_RISK`, "
-                 "`NOT_RECOMMENDED`, or `UNKNOWN`. If no such candidate exists, the "
-                 "top-ranked platform is reported with a warning.")
+    if best_fit_result:
+        summary = best_fit_result["assessment"].get("assessment_summary", {})
+        rec = summary.get("overall_recommendation", "UNKNOWN")
+        alloc_ok = best_fit_result.get("allocation_ok", True)
+        is_recommended = recommended == best_fit_name
+        lines.append(f"- **Best-fit platform:** **{best_fit_name}**")
+        lines.append(f"- **Overall recommendation:** {rec}")
+        lines.append(
+            "- **Port-allocation status:** "
+            + ("PASS" if alloc_ok else "FAIL — see Migration Path")
+        )
+        lines.append(
+            f"- **Source profile:** `{best_fit_result.get('source_file', '')}`"
+        )
+        lines.append(
+            f"- **Platforms compared:** {comparison.get('platform_count', 0)}"
+        )
+        if not is_recommended:
+            lines.append("")
+            lines.append(
+                "> **Caveat:** this platform is the top-ranked candidate but has "
+                "**not** earned `LIKELY_FIT` or `CONDITIONAL_FIT`. Treat as the "
+                "best available option, not an endorsement. See Migration Path "
+                "and Ranked Candidates below for the disposition."
+            )
+    else:
+        lines.append("- _No candidate platform was scored._")
     lines.append("")
 
     lines.extend(_device_context_lines_md(analysis))
     lines.append("")
 
-    lines.append("## Ranked Comparison Table")
-    lines.append("")
-    lines.append("| Rank | Platform | Fitness | Recommendation | Risk | Critical | High | Medium | Low |")
-    lines.append("|------|----------|---------|----------------|------|----------|------|--------|-----|")
-    for idx, result in enumerate(results, start=1):
-        summary = result["assessment"].get("assessment_summary", {})
-        counts = summary.get("finding_counts", {})
-        lines.append(
-            f"| {idx} | {result['platform_name']} | {result['fitness_score']} | "
-            f"{summary.get('overall_recommendation', 'UNKNOWN')} | "
-            f"{summary.get('total_risk_score', 0)} | "
-            f"{counts.get('critical', 0)} | {counts.get('high', 0)} | "
-            f"{counts.get('medium', 0)} | {counts.get('low', 0)} |"
-        )
-    lines.append("")
+    if results:
+        lines.append("## Ranked Candidates")
+        lines.append("")
+        lines.extend(_ranked_table_md(results))
+        lines.append("")
 
-    lines.append("## Per-Platform Detail")
-    lines.append("")
-    for idx, result in enumerate(results, start=1):
-        lines.extend(_platform_detail_lines_md(idx, result))
+    if best_fit_result:
+        lines.extend(_best_fit_detail_md(best_fit_result, analysis))
 
-    return "\n".join(lines)
+    other_results = [
+        r for r in results if r["platform_name"] != best_fit_name
+    ]
+    if other_results:
+        lines.append("## Other Candidates")
+        lines.append("")
+        for idx, r in enumerate(other_results, start=2):
+            lines.extend(_other_candidate_md(idx, r))
+
+    if results:
+        lines.extend(_scoring_appendix_md(results))
+
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +1202,10 @@ def _device_context_html(analysis):
     services = analysis.get("services", {})
     policy = analysis.get("policy", {})
     crypto = analysis.get("crypto_vpn", {})
+    runtime = analysis.get("runtime", {}) or {}
+    runtime_nat = runtime.get("nat", {}) or {}
+    runtime_crypto = runtime.get("crypto", {}) or {}
+    runtime_routes = runtime.get("route_table", {}) or {}
 
     by_type = interfaces.get("active_physical_by_type", {})
     by_speed = interfaces.get("active_physical_by_speed_class", {})
@@ -1000,14 +1252,114 @@ def _device_context_html(analysis):
             rows.append(("Speed-class inference", inference_value))
     rows += [
         ("Active subinterfaces", _esc(interfaces.get("active_subinterfaces", 0))),
-        ("Active tunnels", _esc(interfaces.get("active_tunnels", 0))),
+        ("Active tunnels (config)", _esc(interfaces.get("active_tunnels", 0))),
         ("Active port-channels", _esc(interfaces.get("active_port_channels", 0))),
+    ]
+
+    # Routing scale block.
+    routing_rows = [
         ("Routing protocols",
          _esc(", ".join(summary.get("routing_protocols_enabled", []) or ["None"]))),
         ("BGP neighbors", _esc(_get(routing, ["bgp", "neighbor_count"], 0))),
         ("VRFs", _esc(len(routing.get("vrfs", []) or []))),
         ("Static routes", _esc(routing.get("static_route_count", 0))),
     ]
+    ospf_procs = _get(routing, ["ospf", "processes"], []) or []
+    eigrp_procs = _get(routing, ["eigrp", "processes"], []) or []
+    if ospf_procs or eigrp_procs:
+        routing_rows.append(("OSPF processes", _esc(len(ospf_procs))))
+        routing_rows.append(("EIGRP processes", _esc(len(eigrp_procs))))
+        routing_rows.append((
+            "Neighbor counts",
+            "<em>OSPF / EIGRP neighbor counts depend on runtime harvest (see "
+            "<a href='https://github.com/rmsumida/netfit/issues/22'>GH #22</a>). "
+            "Without <code>show ip ospf neighbor</code> / <code>show ip eigrp "
+            "neighbors</code> output, only process counts are visible here.</em>",
+        ))
+    if runtime_routes:
+        total_routes = runtime_routes.get("ipv4_total")
+        if total_routes is not None:
+            routing_rows.append(("Live IPv4 routes (runtime)", _esc(total_routes)))
+        by_proto = runtime_routes.get("ipv4_by_protocol", {}) or {}
+        if by_proto:
+            routing_rows.append((
+                "Live routes by protocol",
+                _esc(", ".join(f"{k}={v}" for k, v in sorted(by_proto.items()))),
+            ))
+
+    # NAT scale block.
+    nat_rows = []
+    if services.get("nat_present"):
+        nat_rows.append((
+            "NAT configured",
+            f"Yes ({_esc(services.get('nat_line_count', 0))} config lines)",
+        ))
+    else:
+        nat_rows.append(("NAT configured", "No"))
+    if runtime_nat:
+        active = runtime_nat.get("active_translations")
+        peak = runtime_nat.get("peak_translations")
+        if active is not None or peak is not None:
+            nat_rows.append((
+                "Translations (runtime)",
+                f"active={_esc(active if active is not None else 'unknown')}, "
+                f"peak={_esc(peak if peak is not None else 'unknown')}",
+            ))
+        hits = runtime_nat.get("hits")
+        misses = runtime_nat.get("misses")
+        if hits is not None or misses is not None:
+            nat_rows.append((
+                "NAT hits/misses (runtime)",
+                f"{_esc(hits if hits is not None else 'unknown')} / "
+                f"{_esc(misses if misses is not None else 'unknown')}",
+            ))
+    elif services.get("nat_present"):
+        nat_rows.append((
+            "Translations (runtime)",
+            "<em>Not available. Provide <code>show ip nat statistics</code> "
+            "harvest to surface active / peak translation counts.</em>",
+        ))
+
+    # IPsec / VPN scale block.
+    crypto_rows = []
+    if crypto.get("crypto_present"):
+        parts_c = []
+        if crypto.get("isakmp_present"):
+            parts_c.append("ISAKMP")
+        if crypto.get("ikev2_present"):
+            parts_c.append("IKEv2")
+        if crypto.get("ipsec_present"):
+            parts_c.append("IPsec")
+        if crypto.get("tunnel_interfaces_present"):
+            parts_c.append("tunnel-if")
+        mode = "/".join(parts_c) if parts_c else "crypto (unspecified)"
+        crypto_rows.append((
+            "Crypto configured",
+            f"Yes — {_esc(mode)} ({_esc(crypto.get('crypto_line_count', 0))} "
+            "config lines)",
+        ))
+    else:
+        crypto_rows.append(("Crypto configured", "No"))
+    crypto_rows.append((
+        "Tunnel interfaces (config)",
+        _esc(interfaces.get("active_tunnels", 0)),
+    ))
+    if runtime_crypto:
+        active_sas = runtime_crypto.get("active_sas")
+        total_sas = runtime_crypto.get("total_sas")
+        if active_sas is not None or total_sas is not None:
+            crypto_rows.append((
+                "IPsec SAs (runtime)",
+                f"active={_esc(active_sas if active_sas is not None else 'unknown')}, "
+                f"total={_esc(total_sas if total_sas is not None else 'unknown')}",
+            ))
+    elif crypto.get("crypto_present"):
+        crypto_rows.append((
+            "IPsec SAs (runtime)",
+            "<em>Not available. Provide <code>show crypto ipsec sa count</code> "
+            "harvest to surface active / total SA counts.</em>",
+        ))
+
     feature_flags = [
         ("VRF", summary.get("vrf_present")),
         ("IPv6", summary.get("ipv6_present")),
@@ -1017,16 +1369,35 @@ def _device_context_html(analysis):
         ("Crypto/VPN", crypto.get("crypto_present")),
         ("AAA", security.get("aaa_present")),
     ]
-    rows.append((
+    feature_row = (
         "Features present",
         _esc(", ".join(f"{label}={_bool_str(flag)}" for label, flag in feature_flags)),
-    ))
+    )
 
-    out = ['<h2>Source Device Context</h2>', '<table>']
+    def _render_subtable(heading, subrows):
+        if not subrows:
+            return ""
+        parts = [
+            f"<h3>{_esc(heading)}</h3>",
+            "<table>",
+            '<tr><th style="width: 220px;">Field</th><th>Value</th></tr>',
+        ]
+        for label, value in subrows:
+            parts.append(f"<tr><td>{_esc(label)}</td><td>{value}</td></tr>")
+        parts.append("</table>")
+        return "\n".join(parts)
+
+    out = ['<h2>Source Device Context</h2>']
+    out.append('<h3>Inventory &amp; interfaces</h3>')
+    out.append('<table>')
     out.append('<tr><th style="width: 220px;">Field</th><th>Value</th></tr>')
     for label, value in rows:
         out.append(f"<tr><td>{_esc(label)}</td><td>{value}</td></tr>")
     out.append("</table>")
+    out.append(_render_subtable("Routing scale", routing_rows))
+    out.append(_render_subtable("NAT scale", nat_rows))
+    out.append(_render_subtable("IPsec / VPN scale", crypto_rows))
+    out.append(_render_subtable("Features", [feature_row]))
 
     risks = analysis.get("refresh_risks", []) or []
     considerations = analysis.get("migration_considerations", []) or []
@@ -1041,64 +1412,49 @@ def _device_context_html(analysis):
     return "\n".join(out)
 
 
-def _platform_detail_html(idx, result, is_best_fit):
-    assessment = result.get("assessment", {})
-    summary = assessment.get("assessment_summary", {})
-    rec = summary.get("overall_recommendation", "UNKNOWN")
-
-    parts = [
-        f'<details class="platform"{" open" if is_best_fit else ""}>',
-        f"<summary>{idx}. {_esc(result.get('platform_name', 'UNKNOWN'))} "
-        f"— fitness <code>{_esc(result.get('fitness_score', 0))}</code> "
-        f"— {_recommendation_badge_html(rec)}</summary>",
+def _ranked_table_html(results, best_fit_name):
+    """Ranked candidates table (HTML). No fitness column — scoring is in
+    the methodology appendix."""
+    body = [
+        "<h2>Ranked Candidates</h2>",
         "<table>",
-        f"<tr><th>Source file</th><td><code>{_esc(result.get('source_file', ''))}</code></td></tr>",
-        f"<tr><th>Total risk score</th><td>{_esc(summary.get('total_risk_score', 0))}</td></tr>",
-        "</table>",
+        "<tr><th>Rank</th><th>Platform</th><th>Verdict</th>"
+        "<th>Risk score</th><th>Critical</th><th>High</th>"
+        "<th>Medium</th><th>Low</th></tr>",
     ]
+    for idx, r in enumerate(results, start=1):
+        summary = r["assessment"].get("assessment_summary", {})
+        counts = summary.get("finding_counts", {})
+        rec_cell = _recommendation_badge_html(
+            summary.get("overall_recommendation", "UNKNOWN")
+        )
+        is_best = r["platform_name"] == best_fit_name
+        row_class = ' class="best-fit"' if is_best else ""
+        body.append(
+            f"<tr{row_class}>"
+            f"<td>{idx}</td>"
+            f"<td>{_esc(r['platform_name'])}</td>"
+            f"<td>{rec_cell}</td>"
+            f"<td>{_esc(summary.get('total_risk_score', 0))}</td>"
+            f"<td>{_esc(counts.get('critical', 0))}</td>"
+            f"<td>{_esc(counts.get('high', 0))}</td>"
+            f"<td>{_esc(counts.get('medium', 0))}</td>"
+            f"<td>{_esc(counts.get('low', 0))}</td>"
+            "</tr>"
+        )
+    body.append("</table>")
+    return body
 
-    breakdown = result.get("score_breakdown", []) or []
-    if breakdown:
-        penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
-        bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
-        parts.append("<h3>Why this platform ranked here</h3><ul>")
-        if penalties:
-            parts.append("<li><strong>Top penalties:</strong> "
-                         + ", ".join(f"{_esc(p[0])} ({p[1]:+g})" for p in penalties)
-                         + "</li>")
-        if bonuses:
-            parts.append("<li><strong>Top bonuses:</strong> "
-                         + ", ".join(f"{_esc(b[0])} ({b[1]:+g})" for b in bonuses)
-                         + "</li>")
-        parts.append("</ul>")
 
-        groups = _group_breakdown(breakdown)
-        if groups:
-            parts.append("<h3>Score drivers (grouped)</h3><table>")
-            parts.append(
-                "<tr><th>Driver</th><th style='width: 110px; text-align: right;'>"
-                "Net impact</th><th>Largest contributors</th></tr>"
-            )
-            for g in groups:
-                examples = "; ".join(
-                    f"{_esc(name)} ({val:+g})" for name, val in g["examples"]
-                )
-                parts.append(
-                    f"<tr><td>{_esc(g['label'])}</td>"
-                    f"<td style='text-align: right;'>{g['impact']:+g}</td>"
-                    f"<td>{examples}</td></tr>"
-                )
-            parts.append("</table>")
-            parts.append(
-                "<p style='font-size: 12px; color: #57606a; margin-top: -8px;'>"
-                "Full per-row breakdown is available in <code>platform_comparison.json</code>"
-                " under each result's <code>score_breakdown</code> field.</p>"
-            )
-
+def _allocation_block_html(result):
+    """Demand-vs-capacity table + allocation outcome (HTML). Returns a list
+    of parts (possibly empty for the table if no speed data)."""
     src_demand = result.get("source_demand", {}) or {}
     native_supply = result.get("native_supply", {}) or {}
     alloc_detail = result.get("allocation_detail", {}) or {}
     all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
+
+    parts = []
     if all_speeds:
         parts.append("<h3>Demand vs capacity (by speed class)</h3><table>")
         parts.append(
@@ -1119,28 +1475,33 @@ def _platform_detail_html(idx, result, is_best_fit):
             )
         parts.append("</table>")
         parts.append(
-            "<p style='font-size: 12px; color: #57606a; margin-top: -8px;'>"
-            "<strong>Matched native</strong> = demand absorbed by ports of the "
-            "same speed class. <strong>Matched upward</strong> = demand absorbed "
-            "by a higher-speed native port at 1:1 (e.g. a 1G demand satisfied by "
-            "a 10G port). <strong>Matched via breakout</strong> = demand absorbed "
-            "by fanning out a higher-speed port into N child ports of the dest "
-            "speed (e.g. one 40G port → 4× 10G via a <code>40G_to_4x10G</code> "
-            "slot). <strong>Unmet</strong> = remaining demand with no native, "
-            "upward, or breakout capacity.</p>"
+            "<p style='font-size: 12px; color: #57606a;'>"
+            "<strong>Matched native</strong> = demand absorbed by same-speed-class "
+            "ports. <strong>Matched upward</strong> = higher-speed native port "
+            "absorbs lower-speed demand at 1:1. <strong>Matched via breakout</strong> "
+            "= higher-speed port fanned out into N child ports of the dest speed "
+            "(e.g. one 40G → 4× 10G via a <code>40G_to_4x10G</code> slot). "
+            "<strong>Unmet</strong> = remaining demand with no native, upward, or "
+            "breakout capacity.</p>"
         )
 
     alloc_ok = result.get("allocation_ok")
     unmet = result.get("unmet_demand", {}) or {}
-    parts.append("<h3>Allocation outcome</h3>")
-    parts.append(f"<p><strong>Status:</strong> {'PASS' if alloc_ok else 'FAIL'}</p>")
-    if unmet:
-        parts.append("<p><strong>Unmet demand:</strong> "
-                     + _esc(", ".join(f"{k}={v}" for k, v in unmet.items())) + "</p>")
     breakout = result.get("breakout", {}) or {}
+    parts.append("<h3>Allocation outcome</h3>")
+    parts.append(
+        f"<p><strong>Status:</strong> {'PASS' if alloc_ok else 'FAIL'}</p>"
+    )
+    if unmet:
+        parts.append(
+            "<p><strong>Unmet demand:</strong> "
+            + _esc(", ".join(f"{k}={v}" for k, v in unmet.items())) + "</p>"
+        )
     if breakout:
-        parts.append("<p><strong>Breakout available:</strong> "
-                     + _esc(", ".join(f"{k}={v}" for k, v in breakout.items())) + "</p>")
+        parts.append(
+            "<p><strong>Breakout available:</strong> "
+            + _esc(", ".join(f"{k}={v}" for k, v in breakout.items())) + "</p>"
+        )
     breakout_used = result.get("breakout_used", {}) or {}
     if breakout_used:
         consumed_summaries = []
@@ -1153,116 +1514,271 @@ def _platform_detail_html(idx, result, is_best_fit):
             consumed_summaries.append(
                 f"{key}={parents} → {parents * count}×{dest} ports yielded"
             )
-        parts.append("<p><strong>Breakout consumed:</strong> "
-                     + _esc(", ".join(consumed_summaries)) + "</p>")
+        parts.append(
+            "<p><strong>Breakout consumed:</strong> "
+            + _esc(", ".join(consumed_summaries)) + "</p>"
+        )
+    return parts
 
-    platform_notes = assessment.get("platform_notes", []) or []
+
+def _best_fit_detail_html(result, analysis):
+    parts = [f"<h2>Best-Fit Detail: {_esc(result['platform_name'])}</h2>"]
+
+    platform_notes = result["assessment"].get("platform_notes", []) or []
     if platform_notes:
         parts.append("<h3>About this platform</h3><ul>")
         parts.extend(f"<li>{_esc(note)}</li>" for note in platform_notes)
         parts.append("</ul>")
 
-    findings = assessment.get("findings", []) or []
-    if findings:
-        parts.append("<h3>Assessor findings</h3>")
-        for f in findings:
+    parts.extend(_allocation_block_html(result))
+
+    actionable = _actionable_findings(
+        result["assessment"].get("findings", []) or []
+    )
+    if actionable:
+        parts.append("<h3>Migration path</h3>")
+        parts.append(
+            "<p>Findings that need to be addressed before or during cutover:</p>"
+        )
+        for f in sorted(
+            actionable,
+            key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                .get(x.get("severity"), 4),
+        ):
             parts.append(
                 '<div class="finding">'
                 f'<div class="finding-title">{_esc(f.get("title", "Untitled"))}</div>'
                 f'<div class="finding-meta">'
                 f'{_sev_badge_html(f.get("severity", "info"))} '
-                f'· Category: {_esc(f.get("category", "unknown"))} '
-                f'· Score impact: {_esc(f.get("score", 0))}</div>'
+                f'· Category: {_esc(f.get("category", "unknown"))}</div>'
             )
             if f.get("detail"):
-                parts.append(f'<div><strong>Detail:</strong> {_esc(f["detail"])}</div>')
+                parts.append(
+                    f'<div><strong>Detail:</strong> {_esc(f["detail"])}</div>'
+                )
             if f.get("recommendation"):
                 parts.append(
-                    f'<div><strong>Recommendation:</strong> {_esc(f["recommendation"])}</div>'
+                    f'<div><strong>Action:</strong> {_esc(f["recommendation"])}</div>'
                 )
             parts.append("</div>")
 
+    checklist = _validation_checklist_items(result, analysis)
+    if checklist:
+        parts.append("<h3>Pre-cutover validation checklist</h3><ul>")
+        for item in checklist:
+            parts.append(
+                f'<li><input type="checkbox" disabled> {_esc(item)}</li>'
+            )
+        parts.append("</ul>")
+
+    return parts
+
+
+def _other_candidate_html(idx, result):
+    assessment = result.get("assessment", {})
+    summary = assessment.get("assessment_summary", {})
+    rec = summary.get("overall_recommendation", "UNKNOWN")
+
+    parts = [
+        '<details class="platform">',
+        f'<summary>{idx}. {_esc(result["platform_name"])} — '
+        f'{_recommendation_badge_html(rec)}</summary>',
+    ]
+
+    findings = assessment.get("findings", []) or []
+    high_sev = [f for f in findings if f.get("severity") in ("critical", "high")]
+    med_sev = [f for f in findings if f.get("severity") == "medium"]
+
+    if high_sev:
+        parts.append("<p><strong>Blocking findings:</strong></p><ul>")
+        for f in high_sev:
+            parts.append(
+                f'<li>{_sev_badge_html(f.get("severity", "info"))} '
+                f'{_esc(f.get("title", "Untitled"))}</li>'
+            )
+        parts.append("</ul>")
+    if med_sev:
+        parts.append("<p><strong>Material findings:</strong></p><ul>")
+        for f in med_sev:
+            parts.append(
+                f'<li>{_sev_badge_html(f.get("severity", "info"))} '
+                f'{_esc(f.get("title", "Untitled"))}</li>'
+            )
+        parts.append("</ul>")
+    if not (high_sev or med_sev):
+        parts.append("<p><em>No blocking or material findings.</em></p>")
+
+    unmet = result.get("unmet_demand", {}) or {}
+    if unmet:
+        parts.append(
+            "<p><strong>Unmet port demand:</strong> "
+            + _esc(", ".join(f"{v}× {k}" for k, v in unmet.items())) + "</p>"
+        )
+
     parts.append("</details>")
-    return "\n".join(parts)
+    return parts
 
 
-def build_comparison_html(comparison, analysis):
+def _scoring_appendix_html(results):
+    parts = [
+        "<h2>Scoring Methodology (Appendix)</h2>",
+        "<p>Fitness starts at 1000 and is adjusted by overall recommendation, "
+        "severity-weighted finding counts, total risk score, interface capacity / "
+        "speed allocation checks, scale-headroom utilization, and role-alignment "
+        "preferences. The <strong>Recommended platform</strong> is the highest-"
+        "ranked candidate whose verdict is <code>LIKELY_FIT</code> or "
+        "<code>CONDITIONAL_FIT</code>.</p>",
+        "<p><strong>Users should read the verdict and findings above — this "
+        "appendix exists for audit, tie-breaker, and calibration purposes "
+        "only.</strong></p>",
+        "<table>",
+        "<tr><th>Rank</th><th>Platform</th><th>Fitness</th></tr>",
+    ]
+    for idx, r in enumerate(results, start=1):
+        parts.append(
+            f"<tr><td>{idx}</td>"
+            f"<td>{_esc(r['platform_name'])}</td>"
+            f"<td>{_esc(r['fitness_score'])}</td></tr>"
+        )
+    parts.append("</table>")
+
+    for idx, result in enumerate(results, start=1):
+        breakdown = result.get("score_breakdown", []) or []
+        if not breakdown:
+            continue
+        parts.append(f"<h3>{idx}. {_esc(result['platform_name'])}</h3>")
+        penalties = sorted(
+            (s for s in breakdown if s[1] < 0), key=lambda x: x[1]
+        )[:3]
+        bonuses = sorted(
+            (s for s in breakdown if s[1] > 0), key=lambda x: -x[1]
+        )[:3]
+        parts.append("<ul>")
+        if penalties:
+            parts.append(
+                "<li><strong>Top penalties:</strong> "
+                + ", ".join(f"{_esc(p[0])} ({p[1]:+g})" for p in penalties)
+                + "</li>"
+            )
+        if bonuses:
+            parts.append(
+                "<li><strong>Top bonuses:</strong> "
+                + ", ".join(f"{_esc(b[0])} ({b[1]:+g})" for b in bonuses)
+                + "</li>"
+            )
+        parts.append("</ul>")
+        groups = _group_breakdown(breakdown)
+        if groups:
+            parts.append("<table>")
+            parts.append(
+                "<tr><th>Driver</th>"
+                "<th style='width: 110px; text-align: right;'>Net impact</th>"
+                "<th>Largest contributors</th></tr>"
+            )
+            for g in groups:
+                examples = "; ".join(
+                    f"{_esc(name)} ({val:+g})" for name, val in g["examples"]
+                )
+                parts.append(
+                    f"<tr><td>{_esc(g['label'])}</td>"
+                    f"<td style='text-align: right;'>{g['impact']:+g}</td>"
+                    f"<td>{examples}</td></tr>"
+                )
+            parts.append("</table>")
+
+    parts.append(
+        "<p style='font-size: 12px; color: #57606a;'>"
+        "Full per-row breakdown for every platform is available in "
+        "<code>platform_comparison.json</code> under each result's "
+        "<code>score_breakdown</code> field.</p>"
+    )
+    return parts
+
+
+def build_report_html(comparison, analysis):
+    """Unified refresh report as HTML. Same section sequence as the
+    Markdown counterpart; scoring lives in the bottom appendix."""
     hostname = comparison.get("device_hostname", "UNKNOWN")
-    top_ranked = comparison.get("top_ranked_platform")
-    recommended = comparison.get("recommended_platform")
-    best_fit = comparison.get("best_fit_platform")
     results = comparison.get("results", [])
-
     metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
+    best_fit_name = comparison.get("best_fit_platform")
+    recommended = comparison.get("recommended_platform")
+    best_fit_result = _find_best_fit_result(comparison)
+
     body_parts = [
-        "<h1>Multi-Platform Refresh Comparison</h1>",
+        f"<h1>Hardware Refresh Report — <code>{_esc(hostname)}</code></h1>",
         f'<p style="font-size: 12px; color: #57606a; margin-top: -8px;">'
         f"Generated {_esc(metadata.get('generated_at', 'UNKNOWN'))} by netfit "
         f"{_esc(metadata.get('netfit_version', 'UNKNOWN'))}.</p>",
-        '<div class="summary-box">',
-        f"<p><strong>Device hostname:</strong> {_esc(hostname)}</p>",
-        f"<p><strong>Platforms compared:</strong> {_esc(comparison.get('platform_count', 0))}</p>",
-        f"<p><strong>Top-ranked platform:</strong> {_esc(top_ranked or 'None')}</p>",
     ]
-    if recommended:
-        body_parts.append(
-            f"<p><strong>Recommended platform:</strong> <strong>{_esc(recommended)}</strong></p>"
-        )
-    else:
-        body_parts.append(
-            "<p><strong>Recommended platform:</strong> <em>None — no candidate earned "
-            "LIKELY_FIT or CONDITIONAL_FIT</em></p>"
-        )
-    body_parts.append("</div>")
 
-    if not recommended:
+    body_parts.append("<h2>Verdict</h2>")
+    if best_fit_result:
+        summary = best_fit_result["assessment"].get("assessment_summary", {})
+        rec = summary.get("overall_recommendation", "UNKNOWN")
+        alloc_ok = best_fit_result.get("allocation_ok", True)
+        is_recommended = recommended == best_fit_name
+        body_parts.append('<div class="summary-box">')
         body_parts.append(
-            '<div class="warning-box">'
-            "<strong>Warning:</strong> No candidate platform is recommended. "
-            "Either expand the platform set or revisit the assessor calibration."
-            "</div>"
+            "<p><strong>Best-fit platform:</strong> "
+            f"<strong>{_esc(best_fit_name)}</strong></p>"
         )
+        body_parts.append(
+            "<p><strong>Overall recommendation:</strong> "
+            f"{_recommendation_badge_html(rec)}</p>"
+        )
+        alloc_badge = (
+            '<span class="rec rec-fit">PASS</span>' if alloc_ok
+            else '<span class="rec rec-conditional">FAIL — see Migration Path</span>'
+        )
+        body_parts.append(
+            f"<p><strong>Port-allocation status:</strong> {alloc_badge}</p>"
+        )
+        body_parts.append(
+            "<p><strong>Source profile:</strong> "
+            f"<code>{_esc(best_fit_result.get('source_file', ''))}</code></p>"
+        )
+        body_parts.append(
+            "<p><strong>Platforms compared:</strong> "
+            f"{_esc(comparison.get('platform_count', 0))}</p>"
+        )
+        body_parts.append("</div>")
+        if not is_recommended:
+            body_parts.append(
+                '<div class="warning-box"><strong>Caveat:</strong> '
+                "this platform is the top-ranked candidate but has "
+                "<strong>not</strong> earned <code>LIKELY_FIT</code> or "
+                "<code>CONDITIONAL_FIT</code>. Treat as the best available "
+                "option, not an endorsement. See Migration Path and Ranked "
+                "Candidates below for the disposition.</div>"
+            )
+    else:
+        body_parts.append("<p><em>No candidate platform was scored.</em></p>")
 
     body_parts.append(_device_context_html(analysis))
 
-    body_parts.append("<h2>Ranked Comparison</h2><table>")
-    body_parts.append(
-        "<tr><th>Rank</th><th>Platform</th><th>Fitness</th>"
-        "<th>Recommendation</th><th>Risk score</th>"
-        "<th>Critical</th><th>High</th><th>Medium</th><th>Low</th></tr>"
-    )
-    for idx, result in enumerate(results, start=1):
-        summary = result["assessment"].get("assessment_summary", {})
-        counts = summary.get("finding_counts", {})
-        rec_cell = _recommendation_badge_html(summary.get("overall_recommendation", "UNKNOWN"))
-        is_best = result["platform_name"] == best_fit
-        row_class = ' class="best-fit"' if is_best else ""
-        body_parts.append(
-            f"<tr{row_class}>"
-            f"<td>{idx}</td>"
-            f"<td>{_esc(result['platform_name'])}</td>"
-            f"<td>{_esc(result['fitness_score'])}</td>"
-            f"<td>{rec_cell}</td>"
-            f"<td>{_esc(summary.get('total_risk_score', 0))}</td>"
-            f"<td>{_esc(counts.get('critical', 0))}</td>"
-            f"<td>{_esc(counts.get('high', 0))}</td>"
-            f"<td>{_esc(counts.get('medium', 0))}</td>"
-            f"<td>{_esc(counts.get('low', 0))}</td>"
-            "</tr>"
-        )
-    body_parts.append("</table>")
+    if results:
+        body_parts.extend(_ranked_table_html(results, best_fit_name))
 
-    body_parts.append("<h2>Per-Platform Detail</h2>")
-    for idx, result in enumerate(results, start=1):
-        body_parts.append(_platform_detail_html(
-            idx, result, is_best_fit=result["platform_name"] == best_fit
-        ))
+    if best_fit_result:
+        body_parts.extend(_best_fit_detail_html(best_fit_result, analysis))
+
+    other_results = [
+        r for r in results if r["platform_name"] != best_fit_name
+    ]
+    if other_results:
+        body_parts.append("<h2>Other Candidates</h2>")
+        for idx, r in enumerate(other_results, start=2):
+            body_parts.extend(_other_candidate_html(idx, r))
+
+    if results:
+        body_parts.extend(_scoring_appendix_html(results))
 
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
         '<head>\n  <meta charset="utf-8">\n'
-        f"  <title>Refresh Comparison — {_esc(hostname)}</title>\n"
+        f"  <title>Hardware Refresh — {_esc(hostname)}</title>\n"
         f"  <style>{_HTML_CSS}</style>\n"
         "</head>\n<body>\n"
         + "\n".join(body_parts)
@@ -1271,7 +1787,7 @@ def build_comparison_html(comparison, analysis):
 
 
 # ---------------------------------------------------------------------------
-# Best-fit single-platform report
+# Best-fit helpers (shared by unified Markdown and HTML renderers)
 # ---------------------------------------------------------------------------
 
 def _find_best_fit_result(comparison):
@@ -1331,324 +1847,6 @@ def _validation_checklist_items(result, analysis):
     return items
 
 
-def build_best_fit_markdown(comparison, analysis):
-    """Stakeholder-facing answer to 'what should I buy for this device?'.
-
-    Differs from the comparison report's per-platform section: scoped to the
-    winning platform, action-oriented (validation checklist, migration-path
-    findings), with the full per-row breakdown elided."""
-    result = _find_best_fit_result(comparison)
-    hostname = comparison.get("device_hostname", "UNKNOWN")
-    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
-
-    lines = [f"# Hardware Refresh — Best Fit for `{hostname}`", ""]
-
-    if not result:
-        lines.append("_No candidate platform was scored._")
-        return "\n".join(lines) + "\n"
-
-    recommended = comparison.get("recommended_platform")
-    summary = result["assessment"].get("assessment_summary", {})
-    rec = summary.get("overall_recommendation", "UNKNOWN")
-    is_recommended = recommended == result["platform_name"]
-    alloc_ok = result.get("allocation_ok", True)
-
-    lines.append("## Verdict")
-    lines.append("")
-    lines.append(f"- **Recommended platform:** **{result['platform_name']}**")
-    lines.append(f"- **Overall recommendation:** {rec}")
-    lines.append(f"- **Fitness score:** {result['fitness_score']}")
-    lines.append(f"- **Port-allocation status:** {'PASS' if alloc_ok else 'FAIL — see Migration Path'}")
-    lines.append(f"- **Source profile:** `{result.get('source_file', '')}`")
-    if not is_recommended:
-        lines.append("")
-        lines.append(
-            "> **Caveat:** this platform is the top-ranked candidate but has **not** "
-            "earned `LIKELY_FIT` or `CONDITIONAL_FIT`. Treat as the best available "
-            "option, not an endorsement."
-        )
-    lines.append("")
-
-    lines.extend(_device_context_lines_md(analysis))
-    lines.append("")
-
-    platform_notes = result["assessment"].get("platform_notes", []) or []
-    if platform_notes:
-        lines.append("## About this platform")
-        lines.append("")
-        for note in platform_notes:
-            lines.append(f"- {note}")
-        lines.append("")
-
-    breakdown = result.get("score_breakdown", []) or []
-    if breakdown:
-        penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
-        bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
-        lines.append("## Why this won")
-        lines.append("")
-        if bonuses:
-            lines.append("**Top bonuses:** "
-                         + ", ".join(f"{b[0]} ({b[1]:+g})" for b in bonuses))
-        if penalties:
-            lines.append("")
-            lines.append("**Top penalties:** "
-                         + ", ".join(f"{p[0]} ({p[1]:+g})" for p in penalties))
-        lines.append("")
-        lines.append(
-            "_Full ranked comparison and score breakdown across all candidates is in_ "
-            "`platform_comparison.md` _and_ `platform_comparison.json`_._"
-        )
-        lines.append("")
-
-    src_demand = result.get("source_demand", {}) or {}
-    native_supply = result.get("native_supply", {}) or {}
-    alloc_detail = result.get("allocation_detail", {}) or {}
-    all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
-    if all_speeds:
-        lines.append("## Demand vs capacity (by speed class)")
-        lines.append("")
-        lines.append("| Speed | Source demand | Native supply | Matched native | Matched upward | Matched via breakout | Unmet |")
-        lines.append("|-------|---------------|---------------|----------------|----------------|----------------------|-------|")
-        for speed in _sort_speeds(all_speeds):
-            ad = alloc_detail.get(speed, {})
-            lines.append(
-                f"| {speed} | {src_demand.get(speed, 0)} | {native_supply.get(speed, 0)} | "
-                f"{ad.get('matched_native', 0)} | {ad.get('matched_native_upward', 0)} | "
-                f"{ad.get('matched_breakout_fanout', 0)} | {ad.get('unmet', 0)} |"
-            )
-        lines.append("")
-        lines.append(
-            "_**Matched upward** = a higher-speed native port absorbs lower-speed demand at 1:1 "
-            "(e.g. a 10G port serves a 1G demand). **Matched via breakout** = a higher-speed "
-            "port is fanned out into N child ports of the dest speed (e.g. one 40G port → 4× 10G "
-            "via a `40G_to_4x10G` slot)._"
-        )
-        breakout_used = result.get("breakout_used", {}) or {}
-        if breakout_used:
-            consumed_summaries = []
-            for key, parents in breakout_used.items():
-                parsed = _parse_breakout_key(key)
-                if parsed is None:
-                    consumed_summaries.append(f"{key}={parents}")
-                    continue
-                _, count, dest = parsed
-                consumed_summaries.append(
-                    f"{key}={parents} → {parents * count}×{dest} ports yielded"
-                )
-            lines.append("")
-            lines.append("**Breakout consumed:** " + ", ".join(consumed_summaries))
-        lines.append("")
-
-    actionable = _actionable_findings(result["assessment"].get("findings", []) or [])
-    if actionable:
-        lines.append("## Migration path")
-        lines.append("")
-        lines.append("Findings that need to be addressed before or during cutover:")
-        lines.append("")
-        for f in sorted(
-            actionable,
-            key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.get("severity"), 4),
-        ):
-            lines.append(f"- {_sev_badge_md(f.get('severity', 'info'))} **{f.get('title', 'Untitled')}**")
-            if f.get("detail"):
-                lines.append(f"    - _Detail:_ {f['detail']}")
-            if f.get("recommendation"):
-                lines.append(f"    - _Action:_ {f['recommendation']}")
-        lines.append("")
-
-    checklist = _validation_checklist_items(result, analysis)
-    if checklist:
-        lines.append("## Pre-cutover validation checklist")
-        lines.append("")
-        for item in checklist:
-            lines.append(f"- [ ] {item}")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-    lines.append(
-        f"_Generated {metadata.get('generated_at', 'UNKNOWN')} by "
-        f"netfit {metadata.get('netfit_version', 'UNKNOWN')}._"
-    )
-    return "\n".join(lines) + "\n"
-
-
-def build_best_fit_html(comparison, analysis):
-    result = _find_best_fit_result(comparison)
-    hostname = comparison.get("device_hostname", "UNKNOWN")
-    metadata = comparison.get("metadata", {}) or _build_metadata(analysis)
-
-    body_parts = [f"<h1>Hardware Refresh — Best Fit for <code>{_esc(hostname)}</code></h1>"]
-
-    if not result:
-        body_parts.append("<p><em>No candidate platform was scored.</em></p>")
-    else:
-        recommended = comparison.get("recommended_platform")
-        summary = result["assessment"].get("assessment_summary", {})
-        rec = summary.get("overall_recommendation", "UNKNOWN")
-        is_recommended = recommended == result["platform_name"]
-        alloc_ok = result.get("allocation_ok", True)
-
-        body_parts.append('<div class="summary-box">')
-        body_parts.append(
-            f"<p><strong>Recommended platform:</strong> "
-            f"<strong>{_esc(result['platform_name'])}</strong></p>"
-        )
-        body_parts.append(
-            f"<p><strong>Overall recommendation:</strong> {_recommendation_badge_html(rec)}</p>"
-        )
-        body_parts.append(
-            f"<p><strong>Fitness score:</strong> <code>{_esc(result['fitness_score'])}</code></p>"
-        )
-        alloc_badge = ('<span class="rec rec-fit">PASS</span>' if alloc_ok
-                       else '<span class="rec rec-conditional">FAIL — see Migration Path</span>')
-        body_parts.append(
-            f"<p><strong>Port-allocation status:</strong> {alloc_badge}</p>"
-        )
-        body_parts.append(
-            f"<p><strong>Source profile:</strong> "
-            f"<code>{_esc(result.get('source_file', ''))}</code></p>"
-        )
-        body_parts.append("</div>")
-
-        if not is_recommended:
-            body_parts.append(
-                '<div class="warning-box"><strong>Caveat:</strong> '
-                "this platform is the top-ranked candidate but has <strong>not</strong> "
-                "earned <code>LIKELY_FIT</code> or <code>CONDITIONAL_FIT</code>. "
-                "Treat as the best available option, not an endorsement.</div>"
-            )
-
-        body_parts.append(_device_context_html(analysis))
-
-        platform_notes = result["assessment"].get("platform_notes", []) or []
-        if platform_notes:
-            body_parts.append("<h2>About this platform</h2><ul>")
-            body_parts.extend(f"<li>{_esc(note)}</li>" for note in platform_notes)
-            body_parts.append("</ul>")
-
-        breakdown = result.get("score_breakdown", []) or []
-        if breakdown:
-            penalties = sorted((s for s in breakdown if s[1] < 0), key=lambda x: x[1])[:3]
-            bonuses = sorted((s for s in breakdown if s[1] > 0), key=lambda x: -x[1])[:3]
-            body_parts.append("<h2>Why this won</h2><ul>")
-            if bonuses:
-                body_parts.append(
-                    "<li><strong>Top bonuses:</strong> "
-                    + ", ".join(f"{_esc(b[0])} ({b[1]:+g})" for b in bonuses)
-                    + "</li>"
-                )
-            if penalties:
-                body_parts.append(
-                    "<li><strong>Top penalties:</strong> "
-                    + ", ".join(f"{_esc(p[0])} ({p[1]:+g})" for p in penalties)
-                    + "</li>"
-                )
-            body_parts.append("</ul>")
-            body_parts.append(
-                "<p style='font-size: 12px; color: #57606a;'>Full ranked comparison "
-                "and score breakdown across all candidates is in "
-                "<code>platform_comparison.html</code> and "
-                "<code>platform_comparison.json</code>.</p>"
-            )
-
-        src_demand = result.get("source_demand", {}) or {}
-        native_supply = result.get("native_supply", {}) or {}
-        alloc_detail = result.get("allocation_detail", {}) or {}
-        all_speeds = set(src_demand) | set(native_supply) | set(alloc_detail)
-        if all_speeds:
-            body_parts.append("<h2>Demand vs capacity (by speed class)</h2><table>")
-            body_parts.append(
-                "<tr><th>Speed</th><th>Source demand</th><th>Native supply</th>"
-                "<th>Matched native</th><th>Matched upward</th>"
-                "<th>Matched via breakout</th><th>Unmet</th></tr>"
-            )
-            for speed in _sort_speeds(all_speeds):
-                ad = alloc_detail.get(speed, {})
-                body_parts.append(
-                    f"<tr><td>{_esc(speed)}</td>"
-                    f"<td>{_esc(src_demand.get(speed, 0))}</td>"
-                    f"<td>{_esc(native_supply.get(speed, 0))}</td>"
-                    f"<td>{_esc(ad.get('matched_native', 0))}</td>"
-                    f"<td>{_esc(ad.get('matched_native_upward', 0))}</td>"
-                    f"<td>{_esc(ad.get('matched_breakout_fanout', 0))}</td>"
-                    f"<td>{_esc(ad.get('unmet', 0))}</td></tr>"
-                )
-            body_parts.append("</table>")
-            body_parts.append(
-                "<p style='font-size: 12px; color: #57606a;'>"
-                "<strong>Matched upward</strong> = a higher-speed native port absorbs "
-                "lower-speed demand at 1:1. <strong>Matched via breakout</strong> = a "
-                "higher-speed port is fanned out into N child ports of the dest speed "
-                "(e.g. one 40G port → 4× 10G via a <code>40G_to_4x10G</code> slot).</p>"
-            )
-            breakout_used_html = result.get("breakout_used", {}) or {}
-            if breakout_used_html:
-                consumed_summaries = []
-                for key, parents in breakout_used_html.items():
-                    parsed = _parse_breakout_key(key)
-                    if parsed is None:
-                        consumed_summaries.append(f"{key}={parents}")
-                        continue
-                    _, count, dest = parsed
-                    consumed_summaries.append(
-                        f"{key}={parents} → {parents * count}×{dest} ports yielded"
-                    )
-                body_parts.append(
-                    "<p><strong>Breakout consumed:</strong> "
-                    + _esc(", ".join(consumed_summaries)) + "</p>"
-                )
-
-        actionable = _actionable_findings(
-            result["assessment"].get("findings", []) or []
-        )
-        if actionable:
-            body_parts.append("<h2>Migration path</h2>")
-            body_parts.append("<p>Findings that need to be addressed before or during cutover:</p>")
-            for f in sorted(
-                actionable,
-                key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.get("severity"), 4),
-            ):
-                body_parts.append(
-                    '<div class="finding">'
-                    f'<div class="finding-title">{_esc(f.get("title", "Untitled"))}</div>'
-                    f'<div class="finding-meta">'
-                    f'{_sev_badge_html(f.get("severity", "info"))} '
-                    f'· Category: {_esc(f.get("category", "unknown"))}</div>'
-                )
-                if f.get("detail"):
-                    body_parts.append(f'<div><strong>Detail:</strong> {_esc(f["detail"])}</div>')
-                if f.get("recommendation"):
-                    body_parts.append(f'<div><strong>Action:</strong> {_esc(f["recommendation"])}</div>')
-                body_parts.append("</div>")
-
-        checklist = _validation_checklist_items(result, analysis)
-        if checklist:
-            body_parts.append("<h2>Pre-cutover validation checklist</h2><ul>")
-            for item in checklist:
-                body_parts.append(
-                    f'<li><input type="checkbox" disabled> {_esc(item)}</li>'
-                )
-            body_parts.append("</ul>")
-
-        body_parts.append(
-            f'<hr><p style="font-size: 12px; color: #57606a;">Generated '
-            f'{_esc(metadata.get("generated_at", "UNKNOWN"))} by netfit '
-            f'{_esc(metadata.get("netfit_version", "UNKNOWN"))}.</p>'
-        )
-
-    return (
-        "<!DOCTYPE html>\n"
-        '<html lang="en">\n'
-        '<head>\n  <meta charset="utf-8">\n'
-        f"  <title>Best Fit — {_esc(hostname)}</title>\n"
-        f"  <style>{_HTML_CSS}</style>\n"
-        "</head>\n<body>\n"
-        + "\n".join(body_parts)
-        + "\n</body>\n</html>\n"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -1657,14 +1855,15 @@ def build_platform_comparison_reports(
     analysis_json_path,
     target_profiles_folder,
     comparison_json_output=None,
-    comparison_md_output=None,
-    comparison_html_output=None,
-    best_fit_md_output=None,
-    best_fit_html_output=None,
+    report_md_output=None,
+    report_html_output=None,
 ):
     """Load analysis + profiles, compare, and emit outputs.
 
-    Any output parameter left as `None` is skipped.
+    Emits at most three files per device: the machine-readable
+    `platform_comparison.json` (schema unchanged) and the unified
+    human-readable `report.md` / `report.html`. Any output parameter left
+    as `None` is skipped.
     """
     analysis = load_json(analysis_json_path)
     profiles = load_target_profiles(target_profiles_folder)
@@ -1672,13 +1871,9 @@ def build_platform_comparison_reports(
 
     if comparison_json_output:
         save_json(comparison, comparison_json_output)
-    if comparison_md_output:
-        save_text(build_comparison_markdown(comparison, analysis), comparison_md_output)
-    if comparison_html_output:
-        save_text(build_comparison_html(comparison, analysis), comparison_html_output)
-    if best_fit_md_output:
-        save_text(build_best_fit_markdown(comparison, analysis), best_fit_md_output)
-    if best_fit_html_output:
-        save_text(build_best_fit_html(comparison, analysis), best_fit_html_output)
+    if report_md_output:
+        save_text(build_report_markdown(comparison, analysis), report_md_output)
+    if report_html_output:
+        save_text(build_report_html(comparison, analysis), report_html_output)
 
     return comparison

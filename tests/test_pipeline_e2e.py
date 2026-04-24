@@ -32,8 +32,8 @@ def pipeline_outputs(tmp_path_factory):
     mappings = outdir / "sanitization_mappings.json"
     analysis = outdir / "analysis_report.json"
     cmp_json = outdir / "platform_comparison.json"
-    cmp_md = outdir / "platform_comparison.md"
-    cmp_html = outdir / "platform_comparison.html"
+    report_md = outdir / "report.md"
+    report_html = outdir / "report.html"
 
     rules = load_rules(str(PROJECT_ROOT / "rules.yaml"))
     sanitizer = CiscoConfigSanitizer(rules)
@@ -51,8 +51,8 @@ def pipeline_outputs(tmp_path_factory):
         analysis_json_path=str(analysis),
         target_profiles_folder=str(PROJECT_ROOT / "platforms"),
         comparison_json_output=str(cmp_json),
-        comparison_md_output=str(cmp_md),
-        comparison_html_output=str(cmp_html),
+        report_md_output=str(report_md),
+        report_html_output=str(report_html),
     )
 
     return {
@@ -61,8 +61,8 @@ def pipeline_outputs(tmp_path_factory):
         "mappings": mappings,
         "analysis": json.loads(analysis.read_text()),
         "comparison": json.loads(cmp_json.read_text()),
-        "markdown": cmp_md.read_text(),
-        "html": cmp_html.read_text(),
+        "markdown": report_md.read_text(),
+        "html": report_html.read_text(),
     }
 
 
@@ -178,15 +178,60 @@ def test_comparison_result_has_structured_interface_comparison(pipeline_outputs)
 # Renderers
 # ---------------------------------------------------------------------------
 
-def test_markdown_report_includes_device_context_and_all_platforms(pipeline_outputs):
+def test_markdown_report_includes_unified_sections_and_all_platforms(pipeline_outputs):
+    """The unified report must carry verdict-first structure and surface every
+    candidate platform. Scoring is deliberately in the bottom appendix, not
+    the top-line table."""
     md = pipeline_outputs["markdown"]
-    assert "# Multi-Platform Refresh Comparison" in md
+    assert "# Hardware Refresh Report" in md
+    assert "## Verdict" in md
     assert "## Source Device Context" in md
-    assert "## Ranked Comparison Table" in md
-    assert "## Per-Platform Detail" in md
+    assert "### Routing scale" in md
+    assert "### NAT scale" in md
+    assert "### IPsec / VPN scale" in md
+    assert "## Ranked Candidates" in md
+    assert "## Best-Fit Detail" in md
+    assert "## Scoring Methodology (Appendix)" in md
     for platform in ("Cisco_C8500-12X", "Cisco_C8500-12X4QC",
                      "Cisco_C8500-20X6C", "Cisco_C8500L-8S4X"):
         assert platform in md, f"Markdown missing platform section: {platform}"
+
+
+def test_ranked_table_has_no_fitness_column(pipeline_outputs):
+    """Regression for report unification: the ranked-candidates table must
+    show the verdict label, not the fitness score (scoring moved to appendix).
+    If fitness reappears in the top table, the appendix-only boundary has
+    regressed."""
+    md = pipeline_outputs["markdown"]
+    # Locate the Ranked Candidates section's header row.
+    ranked_start = md.index("## Ranked Candidates")
+    appendix_start = md.index("## Scoring Methodology")
+    ranked_block = md[ranked_start:appendix_start]
+    # Header row should not contain "Fitness".
+    header_line = next(
+        (line for line in ranked_block.splitlines() if line.startswith("| Rank")),
+        None,
+    )
+    assert header_line is not None, "Ranked Candidates table missing header row"
+    assert "Fitness" not in header_line, (
+        f"Fitness column leaked into ranked-candidates table: {header_line!r}. "
+        f"Scoring should live only in the bottom appendix."
+    )
+    # Appendix should still carry the fitness table.
+    assert "| Rank | Platform | Fitness |" in md[appendix_start:], (
+        "Scoring Methodology appendix should still show per-platform fitness."
+    )
+
+
+def test_no_separate_best_fit_report_file_produced(pipeline_outputs):
+    """Report unification: only `report.md` / `report.html` (+ the JSON
+    artifact) land in the output directory. No `best_fit_report.*`."""
+    outdir = pipeline_outputs["outdir"]
+    stale = list(outdir.glob("best_fit_report.*")) + list(outdir.glob("platform_comparison.md")) + list(outdir.glob("platform_comparison.html"))
+    assert not stale, f"Stale output files present: {[p.name for p in stale]}"
+    assert (outdir / "report.md").exists()
+    assert (outdir / "report.html").exists()
+    assert (outdir / "platform_comparison.json").exists()
 
 
 def test_html_report_is_real_html_not_pre_wrapped_markdown(pipeline_outputs):
@@ -200,6 +245,28 @@ def test_html_report_is_real_html_not_pre_wrapped_markdown(pipeline_outputs):
     assert 'class="rec' in html_out or 'class="badge' in html_out
     # Must NOT be the old '<pre>-wrapped markdown' shape.
     assert "<pre>" not in html_out[:2000]
+    # Unified structure: Verdict is the first H2, Scoring Methodology is the
+    # last. If these swap, someone has re-elevated scoring above the verdict.
+    verdict_pos = html_out.find("<h2>Verdict</h2>")
+    scoring_pos = html_out.find("Scoring Methodology")
+    assert 0 < verdict_pos < scoring_pos, (
+        "Verdict must appear before Scoring Methodology in the HTML report."
+    )
+
+
+def test_device_context_renders_nat_and_ipsec_scale_sections(pipeline_outputs):
+    """Device-context section must call out NAT and IPsec scale explicitly
+    — previously only BGP/VRF/static were surfaced, which hid workload
+    shape from the reader."""
+    md = pipeline_outputs["markdown"]
+    assert "### NAT scale" in md
+    assert "### IPsec / VPN scale" in md
+    # The seeded router config has no runtime harvest merged, so we should
+    # see config-derived lines without runtime translation / SA counts.
+    nat_block_start = md.index("### NAT scale")
+    nat_block_end = md.index("###", nat_block_start + len("### NAT scale"))
+    nat_block = md[nat_block_start:nat_block_end]
+    assert "NAT configured:" in nat_block
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +340,8 @@ def combined_outputs(tmp_path_factory):
         "analysis": json.loads((outdir / "analysis_report.json").read_text()),
         "mappings": json.loads((outdir / "sanitization_mappings.json").read_text()),
         "sanitized": (outdir / "sanitized_config.txt").read_text(),
+        "report_md": (outdir / "report.md").read_text(),
+        "report_html": (outdir / "report.html").read_text(),
     }
 
 
@@ -312,6 +381,20 @@ def test_combined_harvest_runtime_serials_are_tokenized_in_report(combined_outpu
         assert raw not in runtime_str, f"Serial {raw} leaked into runtime section"
     # And the chassis serial in the inventory section is the tokenized marker.
     assert "<REDACTED_SERIAL_" in runtime["inventory"]["chassis_serial"]
+
+
+def test_combined_harvest_report_surfaces_runtime_nat_translations(combined_outputs):
+    """When a runtime harvest is merged, the device-context section of the
+    unified report should surface the live NAT translation counts alongside
+    the config-side flag. The minimal fixture publishes 42 active
+    translations, so the string `active=42` must appear in the report."""
+    md = combined_outputs["report_md"]
+    assert "### NAT scale" in md
+    assert "active=42" in md, (
+        "Runtime NAT translation count not surfaced in unified report. "
+        "`runtime['nat']['active_translations']` is 42 in the fixture — "
+        "the device-context renderer should show `active=42`."
+    )
 
 
 def test_combined_harvest_sanitized_file_is_config_body_only(combined_outputs):

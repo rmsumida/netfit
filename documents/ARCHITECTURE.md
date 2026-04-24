@@ -103,8 +103,8 @@ Treat this as the north star for structural decisions. Small features can ship i
                                  │ writes
                                  ▼
         ┌────────────────────────────────────────────┐
-        │  output/platform_comparison.{json,md,html} │
-        │  output/best_fit_report.{md,html}          │
+        │  output/platform_comparison.json (machine) │
+        │  output/report.{md,html} (unified report)  │
         └────────────────────────────────────────────┘
 ```
 
@@ -259,11 +259,11 @@ The "any critical → NOT_RECOMMENDED" floor means **false-positive criticals ar
 - Path to `platforms/` directory
 
 **Outputs:**
-- `platform_comparison.json` — full structured comparison (consumed by the rendering layer)
-- `platform_comparison.md` — multi-platform Markdown comparison
-- `platform_comparison.html` — same content as styled HTML
-- `best_fit_report.md` — focused single-platform "what should I buy" view
-- `best_fit_report.html` — same in styled HTML
+- `platform_comparison.json` — full structured comparison (machine artifact; downstream feed for batch summaries and any external integration)
+- `report.md` — unified human-readable report (verdict, source-device workload with routing / NAT / IPsec scale, ranked candidates, best-fit detail, migration path, pre-cutover checklist, scoring methodology appendix)
+- `report.html` — same content as a styled HTML document (severity / recommendation badges, collapsible per-platform detail sections)
+
+The scoring-methodology appendix is intentionally last — the verdict label (`LIKELY_FIT` / `CONDITIONAL_FIT` / etc.) and findings are what users consume; the fitness score is a developer / audit signal that used to lead the old reports and confused readers who had no frame of reference for it.
 
 **Composition:**
 
@@ -277,10 +277,8 @@ build_platform_comparison_reports
   │         ├─ compute_platform_fitness(analysis, profile, assessment)
   │         │    └─ _allocate_speed_capacity(...)             ─► allocation
   │         └─ rank_assessment(assessment)                    ─► tie-breaker tuple
-  ├─ build_comparison_markdown(comparison, analysis)
-  ├─ build_comparison_html(comparison, analysis)
-  ├─ build_best_fit_markdown(comparison, analysis)
-  └─ build_best_fit_html(comparison, analysis)
+  ├─ build_report_markdown(comparison, analysis)   # unified MD report
+  └─ build_report_html(comparison, analysis)       # unified HTML report
 ```
 
 ## Data model
@@ -292,7 +290,8 @@ Each pipeline stage writes its output as JSON. The schemas are not formally defi
 | `sanitized_config.txt` | sanitizer | optionally analyzer (when `--analyze-sanitized`) |
 | `sanitization_mappings.json` | sanitizer | (operator reference; no downstream code consumes it) |
 | `analysis_report.json` | analyzer | assessor (via platform_compare) |
-| `platform_comparison.json` | platform_compare | renderers (markdown, HTML), batch summary |
+| `platform_comparison.json` | platform_compare | unified MD/HTML renderers, batch summary, external integrations |
+| `report.md`, `report.html` | platform_compare | (human-readable final artifact) |
 | `_batch_summary.json` | main.py (batch mode) | (final artifact) |
 
 ## Platform profile schema
@@ -495,7 +494,7 @@ The `recommended_platform` is the highest-ranked candidate whose `overall_recomm
 | Extract a new analyzer field | Add it to the appropriate section in `analyzer.py`'s output. Existing assessors won't break (defaults via `_get`), but you'll need to wire it into the assessor explicitly to use it. |
 | Add a new compatibility check | Add a finding to `assess_refresh` in `assessor.py`. Pick severity carefully — any `critical` finding flips the verdict to `NOT_RECOMMENDED`. |
 | Adjust scoring weights | Edit the constants and bonuses in `compute_platform_fitness` in `platform_compare.py`. Add an E2E test asserting the expected best-fit doesn't regress. |
-| Add a new output format | Add a `build_comparison_<format>(comparison, analysis)` function and wire it into `build_platform_comparison_reports`. |
+| Add a new output format | Add a `build_report_<format>(comparison, analysis)` function and wire it into `build_platform_comparison_reports`. The single unified report (MD + HTML) is the reference template; keep the section sequence (Verdict → Source Device Context → Ranked Candidates → Best-Fit Detail → Other Candidates → Scoring Methodology appendix) across formats. |
 | Change which file extensions are picked up in batch mode | Edit `CONFIG_EXTENSIONS` in `main.py`. |
 
 ## Testing
